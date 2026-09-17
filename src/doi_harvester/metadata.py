@@ -11,6 +11,7 @@ from urllib.parse import quote
 import requests
 
 from .models import ArticleMetadata, DownloadCandidate
+from .publisher_profiles import infer_publisher_profile
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,23 +28,17 @@ class SupportsGet(Protocol):
 
 def _publisher_candidates(doi: str) -> list[DownloadCandidate]:
     """为已知出版社补充稳定正文入口。"""
-    if doi.startswith("10.1021/"):
-        return [
-            DownloadCandidate(
-                url=f"https://pubs.acs.org/doi/pdf/{doi}",
-                source="publisher:acs",
-                open_access=None,
-            )
-        ]
-    if doi.startswith("10.1007/"):
-        return [
-            DownloadCandidate(
-                url=f"https://link.springer.com/content/pdf/{doi}.pdf",
-                source="publisher:springer",
-                open_access=None,
-            )
-        ]
-    return []
+    profile = infer_publisher_profile(doi)
+    if profile is None:
+        return []
+    return [
+        DownloadCandidate(
+            url=template.format(doi=doi),
+            source=f"publisher:{profile.key}",
+            open_access=None,
+        )
+        for template in profile.pdf_templates
+    ]
 
 
 def _deduplicate(candidates: list[DownloadCandidate]) -> list[DownloadCandidate]:
@@ -169,4 +164,3 @@ def merge_candidates(
 ) -> list[DownloadCandidate]:
     """按优先级合并候选并保持顺序。"""
     return _deduplicate([*preferred, *fallback])
-

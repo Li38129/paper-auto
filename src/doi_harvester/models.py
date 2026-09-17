@@ -39,6 +39,20 @@ class Attempt:
     content_type: str = ""
     final_url: str = ""
     bytes_written: int = 0
+    stage: str = "http"
+    provider: str = ""
+    route: str = ""
+    duration_ms: int = 0
+    response_status: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class NextAction:
+    """失败后可由用户或 Agent 执行的下一步。"""
+
+    kind: str
+    message: str
+    command: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +83,11 @@ class DownloadResult:
     supplement_status: str = "not_requested"
     supplements: list[SupplementArtifact] = field(default_factory=list)
     supplement_attempts: list[Attempt] = field(default_factory=list)
+    outcome: str = ""
+    quality: str = ""
+    reason: str = ""
+    warnings: list[str] = field(default_factory=list)
+    next_action: NextAction | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """返回可直接写入 JSON 的结构。"""

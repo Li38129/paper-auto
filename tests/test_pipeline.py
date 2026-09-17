@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from doi_harvester.config import ElsevierCredentials
+from doi_harvester.elsevier import ElsevierDownload
 from doi_harvester.metadata import MetadataError
 from doi_harvester.models import (
     ArticleMetadata,
@@ -22,9 +24,7 @@ class FakeCrossref:
             title="Test title",
             publisher="Test publisher",
             landing_url=f"https://doi.org/{doi}",
-            candidates=[
-                DownloadCandidate("https://example.test/article.pdf", "crossref", True)
-            ],
+            candidates=[DownloadCandidate("https://example.test/article.pdf", "crossref", True)],
         )
 
 
@@ -53,6 +53,23 @@ class FakeTransport:
             reason="downloaded" if self.succeeds else "http_403",
             status_code=200 if self.succeeds else 403,
         )
+
+
+class FakeElsevier:
+    def __init__(self, *, succeeds: bool = True) -> None:
+        self.succeeds = succeeds
+        self.calls: list[str] = []
+
+    def download(self, *, doi: str, destination: Path, **_kwargs: object) -> ElsevierDownload:
+        self.calls.append(doi)
+        if self.succeeds:
+            destination.write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
+            return ElsevierDownload(
+                True,
+                "downloaded",
+                source="elsevier_api:object_eid:direct",
+            )
+        return ElsevierDownload(False, "not_entitled")
 
 
 def test_pipeline_downloads_only_pdf(tmp_path: Path) -> None:
@@ -105,6 +122,55 @@ def test_pipeline_prefers_openalex_candidate(tmp_path: Path) -> None:
     assert transport.urls[0] == "https://repository.test/paper.pdf"
 
 
+def test_pipeline_uses_elsevier_after_oa_and_before_generic_candidate(tmp_path: Path) -> None:
+    transport = FakeTransport(succeeds=False)
+    elsevier = FakeElsevier()
+    harvester = Harvester(
+        output_dir=tmp_path,
+        crossref=FakeCrossref(),
+        openalex=FakeOpenAlex(
+            [DownloadCandidate("https://repository.test/missing.pdf", "openalex", True)]
+        ),
+        transport=transport,
+        elsevier=elsevier,
+        elsevier_credentials=ElsevierCredentials(api_key="secret"),
+    )
+
+    result = harvester.download("10.1016/example")
+
+    assert result.success is True
+    assert result.source == "elsevier_api:object_eid:direct"
+    assert transport.urls == ["https://repository.test/missing.pdf"]
+    assert elsevier.calls == ["10.1016/example"]
+
+
+def test_pipeline_elsevier_failure_does_not_block_generic_fallback(tmp_path: Path) -> None:
+    class ElsevierCrossref(FakeCrossref):
+        def fetch(self, doi: str) -> ArticleMetadata:
+            return ArticleMetadata(
+                doi=doi,
+                publisher="Elsevier",
+                landing_url=f"https://doi.org/{doi}",
+                candidates=[DownloadCandidate("https://fallback.test/article.pdf", "crossref")],
+            )
+
+    transport = FakeTransport(succeeds=True)
+    harvester = Harvester(
+        output_dir=tmp_path,
+        crossref=ElsevierCrossref(),
+        openalex=FakeOpenAlex(),
+        transport=transport,
+        elsevier=FakeElsevier(succeeds=False),
+        elsevier_credentials=ElsevierCredentials(api_key="secret"),
+    )
+
+    result = harvester.download("10.1016/example")
+
+    assert result.success is True
+    assert result.source == "crossref"
+    assert transport.urls == ["https://fallback.test/article.pdf"]
+
+
 def test_pipeline_reports_failure_without_creating_pdf(tmp_path: Path) -> None:
     harvester = Harvester(
         output_dir=tmp_path,
@@ -154,9 +220,7 @@ def test_pipeline_falls_back_to_publisher_rules_when_metadata_is_offline(tmp_pat
     assert "link.springer.com/content/pdf" in transport.urls[0]
 
 
-def test_pipeline_preserves_browser_failure_reason(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_pipeline_preserves_browser_failure_reason(monkeypatch, tmp_path: Path) -> None:
     from doi_harvester import browser
 
     class FakeBrowser:

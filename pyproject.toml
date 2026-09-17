@@ -9,11 +9,13 @@ description = "按 DOI 合法获取期刊正文并生成可审计下载清单"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "pypdf>=6,<7",
   "requests>=2.32,<3",
 ]
 
 [project.optional-dependencies]
 browser = ["playwright>=1.55,<2"]
+agent = ["mcp[cli]>=1,<2"]
 dev = [
   "pytest>=8.4,<9",
   "pytest-cov>=6.2,<7",
@@ -22,6 +24,7 @@ dev = [
 
 [project.scripts]
 doi-harvester = "doi_harvester.cli:main"
+autopaper-mcp = "doi_harvester.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/doi_harvester"]
