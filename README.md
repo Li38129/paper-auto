@@ -13,16 +13,18 @@
 - 使用 `.part` 临时文件和原子替换，失败不会留下损坏 PDF；
 - 默认只保存正文 `article.pdf`，不在论文目录附加清单；
 - 仅在显式指定 `--report-dir` 时集中保存 `batch-report.json`；
-- 可读取 `literature-search-organizer` 生成的 `papers.json`，把正文直接写入既有编号目录；
+- 内置 `$autopaper-literature` 仓库 Skill，持续维护 Excel 文献清单并把正文写入稳定编号目录；
+- 可读取 Skill 生成的 `papers.json`，把正文直接写入既有编号目录；
 - 可选 Playwright + Chrome/Edge 持久化会话，复用用户本人已有机构权限。
 
 ## 安装
 
-项目使用 `uv` 管理环境。统一启动脚本会把虚拟环境和缓存放到工作区的
-`tmp\doi-harvester`，不会在项目目录创建 `.venv`：
+项目以 Windows 为正式支持平台，需要 PowerShell、`uv`，以及 Chrome 或 Edge。
+统一启动脚本会把虚拟环境和缓存放到工作区的 `tmp\doi-harvester`，不会在项目目录创建 `.venv`：
 
 ```powershell
-cd D:\Studys\Doing_Autobackups\Auto_paper
+git clone https://github.com/Li38129/paper-auto.git
+cd paper-auto
 .\scripts\doi-harvester.ps1 --help
 ```
 
@@ -34,6 +36,24 @@ cd D:\Studys\Doing_Autobackups\Auto_paper
 ```powershell
 .\scripts\check.ps1
 ```
+
+## 在 Codex 中完成检索与下载
+
+仓库内置 `.agents\skills\autopaper-literature`。从本仓库或其子目录启动 Codex 后，
+可以直接调用 `$autopaper-literature`，无需把 Skill 复制到个人目录。例如：
+
+```text
+$autopaper-literature 检索近五年 LPSC 氧掺杂实验论文，按室温离子电导率排序，
+保存到 C:\papers\LPSC，并自动下载可合法获取的正文。
+```
+
+Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇总.xlsx`、
+创建稳定编号目录、调用 DOI Harvester，并把 `downloaded`、`cached` 或失败原因回写工作簿。
+重复检索不会改变已有序号和目录名，新论文追加到末尾。缺少 DOI 的论文仍保留在 Excel，
+但不会进入下载器。
+
+如果从其他目录调用个人版 `$literature-search-organizer`，可将 `AUTOPAPER_ROOT`
+设置为本仓库的绝对路径；仓库版 Skill 会优先从当前 Git 根目录自动定位项目。
 
 ## 使用
 
@@ -57,8 +77,8 @@ cd D:\Studys\Doing_Autobackups\Auto_paper
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
-  --papers-file "D:\Studys\Doing_Autobackups\Auto_paper\tmp\doi-harvester\jobs\papers.json" `
-  --output-dir "D:\papers" `
+  --papers-file "$PWD\tmp\doi-harvester\jobs\<任务ID>\papers.json" `
+  --output-dir "C:\papers" `
   --browser-fallback
 ```
 
@@ -129,12 +149,12 @@ downloads/
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
-  --papers-file "D:\Studys\Doing_Autobackups\Auto_paper\tmp\doi-harvester\jobs\papers.json" `
-  --output-dir "D:\...\Dataset\Unprocessed data_9.16" `
-  --report-dir "D:\Studys\Doing_Autobackups\Auto_paper\tmp\doi-harvester\jobs\<任务ID>"
+  --papers-file "$PWD\tmp\doi-harvester\jobs\<任务ID>\papers.json" `
+  --output-dir "C:\papers" `
+  --report-dir "$PWD\tmp\doi-harvester\jobs\<任务ID>"
 ```
 
-此时只会在任务目录写入集中报告，论文编号目录仍只保存正文。Skill 联动会在全部成功后删除该任务目录；若有失败则保留，供定向重试和审查。
+此时只会在任务目录写入集中报告，论文编号目录仍只保存正文。Skill 联动仅在全部下载成功、PDF 校验通过且报告已写回 Excel 后删除任务目录；若有失败则保留，供定向重试和审查。
 
 授权配置目录中还会生成 `auth-state.json`，只记录检查时间、状态和页面地址，不保存或导出账号、密码与 Cookie 内容。
 
@@ -150,7 +170,7 @@ downloads/
 
 ```powershell
 $env:DOI_HARVESTER_NETWORK_TESTS = "1"
-$env:UV_PROJECT_ENVIRONMENT = "D:\Studys\Doing_Autobackups\Auto_paper\tmp\doi-harvester\venv"
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\tmp\doi-harvester\venv"
 uv run --project . --extra dev pytest -m network
 ```
 
