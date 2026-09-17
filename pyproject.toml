@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "doi-harvester"
+version = "0.1.0"
+description = "按 DOI 合法获取期刊正文并生成可审计下载清单"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.55,<2"]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+doi-harvester = "doi_harvester.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doi_harvester"]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-markers", "--cov=doi_harvester", "--cov-report=term-missing"]
+testpaths = ["tests"]
+markers = [
+  "network: 访问真实出版社与元数据服务的慢速测试",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["doi_harvester"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["tmp"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,269 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from doi_harvester import cli
+from doi_harvester.browser import AuthorizationResult
+from doi_harvester.models import DownloadResult
+
+
+def test_load_dois_reads_file_normalizes_and_deduplicates(tmp_path: Path) -> None:
+    doi_file = tmp_path / "dois.txt"
+    doi_file.write_text(
+        "# 注释\nhttps://doi.org/10.1000/ABC\n10.1000/abc\n10.1000/def\n",
+        encoding="utf-8",
+    )
+
+    dois = cli._load_dois(["doi:10.1000/xyz"], doi_file)
+
+    assert dois == ["10.1000/xyz", "10.1000/abc", "10.1000/def"]
+
+
+def test_load_dois_requires_input() -> None:
+    with pytest.raises(ValueError, match="至少需要"):
+        cli._load_dois([], None)
+
+
+def test_main_does_not_write_batch_report_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeHarvester:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+            del overwrite
+            article_dir = tmp_path / doi.replace("/", "_")
+            article_dir.mkdir(parents=True, exist_ok=True)
+            pdf_path = article_dir / "article.pdf"
+            pdf_path.write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
+            return DownloadResult(
+                doi=doi,
+                success=True,
+                status="downloaded",
+                article_dir=article_dir,
+                pdf_path=pdf_path,
+                source="test",
+            )
+
+    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+
+    exit_code = cli.main(
+        ["--doi", "10.1000/example", "--output-dir", str(tmp_path), "--delay", "0"]
+    )
+
+    assert exit_code == 0
+    assert not (tmp_path / "batch-report.json").exists()
+
+
+def test_main_writes_batch_report_to_explicit_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeHarvester:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+            del overwrite
+            article_dir = tmp_path / doi.replace("/", "_")
+            article_dir.mkdir(parents=True, exist_ok=True)
+            pdf_path = article_dir / "article.pdf"
+            pdf_path.write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
+            return DownloadResult(
+                doi=doi,
+                success=True,
+                status="downloaded",
+                article_dir=article_dir,
+                pdf_path=pdf_path,
+                source="test",
+            )
+
+    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    report_dir = tmp_path / "audit"
+
+    exit_code = cli.main(
+        [
+            "--doi",
+            "10.1000/example",
+            "--output-dir",
+            str(tmp_path),
+            "--report-dir",
+            str(report_dir),
+            "--delay",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads((report_dir / "batch-report.json").read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1
+    assert report["results"][0]["success"] is True
+    assert not (tmp_path / "batch-report.json").exists()
+
+
+def test_main_keeps_partial_failure_in_explicit_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeHarvester:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+            del overwrite
+            article_dir = tmp_path / doi.replace("/", "_")
+            if doi.endswith("success"):
+                article_dir.mkdir(parents=True)
+                pdf_path = article_dir / "article.pdf"
+                pdf_path.write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
+                return DownloadResult(
+                    doi=doi,
+                    success=True,
+                    status="downloaded",
+                    article_dir=article_dir,
+                    pdf_path=pdf_path,
+                    source="test",
+                )
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status="challenge_required",
+                article_dir=article_dir,
+            )
+
+    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    report_dir = tmp_path / "job"
+
+    exit_code = cli.main(
+        [
+            "--doi",
+            "10.1000/success",
+            "--doi",
+            "10.1000/failure",
+            "--output-dir",
+            str(tmp_path),
+            "--report-dir",
+            str(report_dir),
+            "--delay",
+            "0",
+        ]
+    )
+
+    report_path = report_dir / "batch-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert exit_code == 2
+    assert report_path.is_file()
+    assert [result["status"] for result in report["results"]] == [
+        "downloaded",
+        "challenge_required",
+    ]
+
+
+def test_main_downloads_papers_file_into_numbered_folders(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target_folder = tmp_path / "81 测试论文，IC=界面研究"
+    papers_file = tmp_path / "papers.json"
+    papers_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "papers": [
+                    {
+                        "rank": 81,
+                        "doi": "10.1000/example",
+                        "title": "测试论文",
+                        "folder_path": str(target_folder),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, Path | None]] = []
+
+    class FakeHarvester:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def download(
+            self,
+            doi: str,
+            *,
+            overwrite: bool = False,
+            article_dir: Path | None = None,
+        ) -> DownloadResult:
+            del overwrite
+            calls.append((doi, article_dir))
+            assert article_dir is not None
+            article_dir.mkdir(parents=True)
+            pdf_path = article_dir / "article.pdf"
+            pdf_path.write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
+            return DownloadResult(
+                doi=doi,
+                success=True,
+                status="downloaded",
+                article_dir=article_dir,
+                pdf_path=pdf_path,
+                source="test",
+            )
+
+    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+
+    exit_code = cli.main(
+        [
+            "download",
+            "--papers-file",
+            str(papers_file),
+            "--output-dir",
+            str(tmp_path),
+            "--delay",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [("10.1000/example", target_folder)]
+    assert set(target_folder.iterdir()) == {target_folder / "article.pdf"}
+    assert not (tmp_path / "batch-report.json").exists()
+
+
+def test_auth_command_initializes_persistent_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAuthorizer:
+        def __init__(self, **kwargs: object) -> None:
+            calls["options"] = kwargs
+
+        def authorize(
+            self, *, publisher: str, doi: str | None, timeout_seconds: float
+        ) -> AuthorizationResult:
+            calls["authorize"] = (publisher, doi, timeout_seconds)
+            return AuthorizationResult(
+                success=True,
+                status="ready",
+                final_url="https://pubs.acs.org/doi/10.1021/example",
+                profile_dir=tmp_path / "profile",
+            )
+
+    monkeypatch.setattr(cli, "BrowserAuthorizer", FakeAuthorizer)
+
+    exit_code = cli.main(
+        [
+            "auth",
+            "--publisher",
+            "acs",
+            "--doi",
+            "10.1021/example",
+            "--profile-dir",
+            str(tmp_path / "profile"),
+            "--auth-timeout",
+            "10",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls["authorize"] == ("acs", "10.1021/example", 10.0)

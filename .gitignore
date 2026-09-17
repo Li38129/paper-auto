@@ -1,0 +1,12 @@
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+__pycache__/
+*.py[cod]
+downloads/
+acceptance-downloads/
+acceptance-browser-profile*/
+.profiles/
+tmp/
