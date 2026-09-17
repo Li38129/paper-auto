@@ -44,6 +44,14 @@
 
 ## 首次下载
 
+批次含 Elsevier DOI 时，先检查一次全局配置：
+
+```powershell
+& '<项目根目录>\scripts\doi-harvester.ps1' elsevier-setup --show
+```
+
+若 API Key 未配置，说明可以运行 `elsevier-setup --set-key --validate` 完成一次性配置；不得索要或代填密钥。Key 缺失不会阻断 OpenAlex、出版社入口和浏览器回退。
+
 ```powershell
 & '<项目根目录>\scripts\doi-harvester.ps1' download `
   --papers-file '<任务目录>\papers.json' `
@@ -52,6 +60,10 @@
   --browser-fallback `
   --delay 1
 ```
+
+任务较多时增加 `--detach`，记录返回的 `job_id`，再用 `jobs status <job_id>` 监控直至终态。任务变为 `stalled` 时只运行一次 `jobs resume <job_id>`；不要重建编号目录或重新编号。
+
+如果 AutoPaper MCP 已注册，可用 `download` 创建相同任务，并用 `job_status` 等待终态。`papers_file`、`output_dir` 和可选 `report_dir` 必须是绝对路径；`report_dir` 只能位于 `<项目根目录>\temp\doi-harvester\jobs`。
 
 默认不要传 `--supplements`。集中报告只能写到任务目录，不得写进论文根目录或编号目录。命令结束后先按 [Excel 汇总规则](workbook.md) 回写报告，再判断重试与清理。
 

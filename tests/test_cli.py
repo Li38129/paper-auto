@@ -5,6 +5,8 @@ import pytest
 
 from doi_harvester import cli
 from doi_harvester.browser import AuthorizationResult
+from doi_harvester.config import ElsevierConfig, GlobalConfig
+from doi_harvester.elsevier import ElsevierDownload
 from doi_harvester.models import DownloadResult
 
 
@@ -267,3 +269,67 @@ def test_auth_command_initializes_persistent_session(
 
     assert exit_code == 0
     assert calls["authorize"] == ("acs", "10.1021/example", 10.0)
+
+
+def test_elsevier_setup_uses_hidden_input_and_masks_secret(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    saved: list[GlobalConfig] = []
+
+    class FakeStore:
+        path = tmp_path / "config.json"
+
+        def __init__(self) -> None:
+            self.config = GlobalConfig()
+
+        def load(self) -> GlobalConfig:
+            return self.config
+
+        def save(self, config: GlobalConfig) -> None:
+            self.config = config
+            saved.append(config)
+
+    monkeypatch.setattr(cli, "GlobalConfigStore", FakeStore)
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: "top-secret-key")
+
+    exit_code = cli.main(["elsevier-setup", "--set-key", "--show"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert saved[0].elsevier.api_key == "top-secret-key"
+    assert "top-secret-key" not in output
+    assert "**********-key" in output
+
+
+def test_elsevier_setup_validate_does_not_keep_pdf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    destinations: list[Path] = []
+
+    class FakeStore:
+        path = tmp_path / "config.json"
+
+        def load(self) -> GlobalConfig:
+            return GlobalConfig(elsevier=ElsevierConfig(api_key="secret"))
+
+        def save(self, _config: GlobalConfig) -> None:
+            return None
+
+    class FakeElsevier:
+        def download(self, *, destination: Path, **_kwargs: object) -> ElsevierDownload:
+            destination.write_bytes(b"%PDF-1.7")
+            destinations.append(destination)
+            return ElsevierDownload(
+                True,
+                "downloaded",
+                source="elsevier_api:object_eid:direct",
+            )
+
+    monkeypatch.setattr(cli, "GlobalConfigStore", FakeStore)
+    monkeypatch.setattr(cli, "ElsevierApiClient", FakeElsevier)
+
+    exit_code = cli.main(["elsevier-setup", "--validate"])
+
+    assert exit_code == 0
+    assert len(destinations) == 1
+    assert not destinations[0].exists()

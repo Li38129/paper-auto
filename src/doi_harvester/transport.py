@@ -125,4 +125,3 @@ class HttpPdfTransport:
         except OSError as exc:
             temporary.unlink(missing_ok=True)
             return Attempt(source="http", url=url, success=False, reason=f"io_error:{exc}")
-

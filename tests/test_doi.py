@@ -29,4 +29,3 @@ def test_normalize_doi_rejects_invalid_values(raw: str) -> None:
 
 def test_doi_slug_is_windows_safe_and_stable() -> None:
     assert doi_slug("10.1007/s10853-013-7226-8") == "10.1007_s10853-013-7226-8"
-

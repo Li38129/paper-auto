@@ -17,9 +17,7 @@ INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 def _read_cdp_endpoint(profile_dir: Path) -> str:
     try:
-        payload = json.loads(
-            (profile_dir / "auth-state.json").read_text(encoding="utf-8")
-        )
+        payload = json.loads((profile_dir / "auth-state.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return ""
     return str(payload.get("cdp_endpoint") or "")
@@ -81,9 +79,7 @@ class BrowserSupplementDownloader:
 
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.connect_over_cdp(
-                    endpoint, timeout=self.timeout_ms
-                )
+                browser = playwright.chromium.connect_over_cdp(endpoint, timeout=self.timeout_ms)
                 if not browser.contexts:
                     return "browser_session_required", [], []
                 context = browser.contexts[0]

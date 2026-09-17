@@ -43,3 +43,5 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 5. Excel 最终写回失败、正文下载失败或仍需人工授权时保留任务目录，并报告可恢复路径和原因。
 
 不得覆盖有效的既有 `article.pdf`，不得改写论文目录中的其他文件，不得代填凭据、破解验证码、绕过付费墙或机构授权。
+
+如果当前会话已经注册 AutoPaper MCP，优先使用其 `search`、`download`、`job_status` 和 `update_excel` 工具执行相同步骤；工具不可用时使用仓库脚本，不得因此改变 Excel 先写入、报告后回写和失败任务留档规则。

@@ -70,4 +70,3 @@ def test_http_transport_rejects_html_disguised_as_pdf(tmp_path: Path) -> None:
     assert outcome.reason == "not_pdf"
     assert not destination.exists()
     assert not destination.with_suffix(".pdf.part").exists()
-

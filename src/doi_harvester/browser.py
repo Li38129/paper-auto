@@ -51,11 +51,7 @@ PDF_SELECTORS = (
 
 def browser_proxy_from_environment() -> dict[str, str] | None:
     """把常见代理环境变量转换为 Playwright 浏览器代理参数。"""
-    server = (
-        os.getenv("HTTPS_PROXY")
-        or os.getenv("ALL_PROXY")
-        or os.getenv("HTTP_PROXY")
-    )
+    server = os.getenv("HTTPS_PROXY") or os.getenv("ALL_PROXY") or os.getenv("HTTP_PROXY")
     if not server:
         return None
     proxy = {"server": server}
@@ -208,8 +204,7 @@ def browser_executable_path(channel: str | None) -> Path | None:
                 Path(os.getenv("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
             ),
             "msedge": (
-                Path(os.getenv("PROGRAMFILES(X86)", ""))
-                / "Microsoft/Edge/Application/msedge.exe",
+                Path(os.getenv("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
                 Path(os.getenv("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
                 Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
             ),
@@ -810,9 +805,7 @@ class BrowserPdfDownloader:
     ) -> tuple[bytes, int, str, str] | None:
         """处理出版社把当前标签导航到内嵌 PDF 查看器的情况。"""
         current_url = str(page.url)
-        if ".pdf" not in current_url.lower() and not _looks_like_article_pdf_url(
-            current_url
-        ):
+        if ".pdf" not in current_url.lower() and not _looks_like_article_pdf_url(current_url):
             return None
         try:
             payload = page.evaluate(

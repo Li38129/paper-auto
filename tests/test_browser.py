@@ -246,9 +246,7 @@ def test_browser_surfaces_cloudflare_challenge(
         (SignalPage(), "authenticated"),
     ],
 )
-def test_classify_page_distinguishes_authorization_states(
-    page: SignalPage, expected: str
-) -> None:
+def test_classify_page_distinguishes_authorization_states(page: SignalPage, expected: str) -> None:
     assert classify_page(page) == expected
 
 
@@ -278,9 +276,7 @@ def test_default_profile_uses_runtime_directory(
     runtime_dir = tmp_path / "runtime"
     monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(runtime_dir))
 
-    assert BrowserPdfDownloader._default_profile_dir() == (
-        runtime_dir / "profiles" / "default"
-    )
+    assert BrowserPdfDownloader._default_profile_dir() == (runtime_dir / "profiles" / "default")
 
 
 def test_browser_proxy_inherits_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,9 +404,7 @@ def test_browser_ignores_non_pdf_page(tmp_path: Path) -> None:
 
 
 def test_browser_matches_same_doi_across_wiley_subdomains() -> None:
-    expected = {
-        "https://onlinelibrary.wiley.com/doi/pdf/10.1002/aenm.202506351"
-    }
+    expected = {"https://onlinelibrary.wiley.com/doi/pdf/10.1002/aenm.202506351"}
 
     matched = _matches_expected_article_url(
         "https://advanced.onlinelibrary.wiley.com/doi/pdfdirect/10.1002/aenm.202506351",

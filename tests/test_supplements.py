@@ -13,9 +13,7 @@ def test_supplement_filename_prefers_content_disposition() -> None:
     name = _supplement_filename(
         url="https://publisher.test/download?id=1",
         disposition="attachment; filename*=UTF-8''supporting%20data.xlsx",
-        content_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
+        content_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         index=1,
     )
 
@@ -26,9 +24,7 @@ def test_supplement_filename_reads_wiley_file_query() -> None:
     name = _supplement_filename(
         url="https://publisher.test/action/downloadSupplement?file=paper-sup.docx",
         disposition="",
-        content_type=(
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        ),
+        content_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         index=1,
     )
 
@@ -78,9 +74,7 @@ def test_browser_supplement_fetch_accepts_docx(tmp_path: Path) -> None:
 
 def test_browser_supplement_downloads_discovered_file(tmp_path: Path) -> None:
     body = b"PK" + b"x" * 2048
-    supplement_url = (
-        "https://publisher.test/action/downloadSupplement?file=paper-sup.docx"
-    )
+    supplement_url = "https://publisher.test/action/downloadSupplement?file=paper-sup.docx"
 
     class FakePage:
         def goto(self, *_args: object, **_kwargs: object) -> None:

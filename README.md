@@ -1,18 +1,22 @@
 # DOI Harvester
 
-一个面向科研工作流的 DOI 文献下载器。当前版本聚焦期刊正文 PDF，支持 DOI 规范化、批量去重、多入口回退、PDF 真伪校验、缓存复用和可选审查报告。
+一个面向科研工作流的 DOI 文献下载器。当前版本聚焦期刊正文 PDF，支持 DOI 规范化、Elsevier API、配置驱动的出版社 Profile、可恢复任务、浏览器会话串行化、MCP 工具和 Excel 文献索引。
 
 > 项目只使用开放获取入口、出版社允许的下载入口或用户本人已有的机构订阅会话，不绕过付费墙或站点安全验证。
 
 ## 当前能力
 
 - 输入裸 DOI、DOI URL、重复 `--doi` 参数或 UTF-8 DOI 文本文件；
-- 优先尝试 OpenAlex 开放获取副本，再尝试 Crossref TDM/出版社正文入口；
+- 固定执行“有效缓存 → OpenAlex OA → Elsevier API → Crossref/出版社入口 → 浏览器兜底”；
+- Elsevier 使用 `view=FULL → MAIN object EID → PDF`，凭据由当前 Windows 用户的 DPAPI 加密；
+- 内置 21 家出版社 Profile，并明确区分 API、HTTP、浏览器已验证和仅配置状态；
+- SQLite 任务支持后台执行、心跳、stalled 检测、恢复、取消和阶段日志；
+- 可选 MCP 提供 `search`、`download`、`job_status`、`update_excel` 四个工具；
 - 支持 Springer 与 ACS 的稳定正文 URL 规则；
 - 对 HTTP 200 的 HTML 登录页、验证码页等伪 PDF 做魔数与最小尺寸校验；
 - 使用 `.part` 临时文件和原子替换，失败不会留下损坏 PDF；
 - 默认只保存正文 `article.pdf`，不在论文目录附加清单；
-- 仅在显式指定 `--report-dir` 时集中保存 `batch-report.json`；
+- 前台下载仅在指定 `--report-dir` 时保存报告；后台任务自动在任务目录保存报告；
 - 内置 `$autopaper-literature` 仓库 Skill，持续维护 Excel 文献清单并把正文写入稳定编号目录；
 - 可读取 Skill 生成的 `papers.json`，把正文直接写入既有编号目录；
 - 可选 Playwright + Chrome/Edge 持久化会话，复用用户本人已有机构权限。
@@ -36,6 +40,19 @@ cd paper-auto
 ```powershell
 .\scripts\check.ps1
 ```
+
+## 一次配置 Elsevier API
+
+API Key 是当前 Windows 用户的全局配置，一次录入后可供所有 AutoPaper 项目使用。密钥保存到 `%LOCALAPPDATA%\AutoPaper\config.json`，其中只有 DPAPI 密文；命令行、报告和日志只显示末四位掩码。Inst Token 仅在图书馆明确提供时才需要配置。
+
+```powershell
+.\scripts\doi-harvester.ps1 elsevier-setup --set-key --show
+.\scripts\doi-harvester.ps1 elsevier-setup --validate
+```
+
+`--validate` 默认使用 `10.1016/j.watres.2024.121507`，文件只写入系统临时目录并在结束后清理。也可使用 `--set-inst-token`、`--proxy-url URL`、`--clear-key`、`--clear-inst-token` 和 `--clear-proxy`。不提供明文 `--api-key` 参数。
+
+读取优先级为 `ELSEVIER_API_KEY` / `ELS_API_KEY` 环境变量，其次是 DPAPI 本地配置。网络先使用 `trust_env=False` 的 direct 路由，让校园网、学校 VPN 或规则 VPN 决定实际出口；只有配置了专用代理且 direct 遇到连接、超时或授权错误时才尝试代理。项目不保存校园账号，也不处理验证码。
 
 ## 在 Codex 中完成检索与下载
 
@@ -74,6 +91,49 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
   --doi-file examples\acceptance-dois.txt `
   --output-dir downloads
 ```
+
+可恢复后台任务：
+
+```powershell
+.\scripts\doi-harvester.ps1 download `
+  --papers-file "$PWD\temp\doi-harvester\jobs\<任务ID>\papers.json" `
+  --output-dir "C:\papers" `
+  --browser-fallback `
+  --detach
+
+.\scripts\doi-harvester.ps1 jobs list
+.\scripts\doi-harvester.ps1 jobs status <任务ID>
+.\scripts\doi-harvester.ps1 jobs tail <任务ID>
+.\scripts\doi-harvester.ps1 jobs resume <任务ID>
+.\scripts\doi-harvester.ps1 jobs cancel <任务ID>
+```
+
+运行诊断；默认不访问出版社，只有 `--network` 才执行真实 Elsevier 探针：
+
+```powershell
+.\scripts\doi-harvester.ps1 doctor
+.\scripts\doi-harvester.ps1 doctor --target-dir "C:\papers"
+.\scripts\doi-harvester.ps1 doctor --network
+```
+
+## MCP 工具
+
+安装 `agent` 可选依赖后，可把以下 stdio 启动脚本注册为本地 MCP 服务器：
+
+```powershell
+.\scripts\autopaper-mcp.ps1 `
+  -NodePath '<Codex 提供的 Node.js>' `
+  -ArtifactNodeModules '<Codex 提供的 bundled node_modules>'
+```
+
+服务器提供：
+
+- `search(query, year_from, year_to, limit)`：OpenAlex 主检索、Crossref 补充并去重；
+- `download(papers_file, output_dir, report_dir, browser_fallback, detach)`：创建任务并返回 `job_id`；
+- `job_status(job_id)`：返回状态、计数和需要人工处理的 DOI；
+- `update_excel(workbook_path, records_path, report_path, resolved_path)`：复用仓库 Skill 的工作簿脚本。
+
+所有 MCP 文件参数必须是绝对路径。PDF 只能写入 `output_dir` 下，报告只能写入 `temp\doi-harvester\jobs`。Excel 工具还需要 Codex 工作区注入 `AUTOPAPER_NODE` 与 `AUTOPAPER_ARTIFACT_NODE_MODULES`；缺失时返回 `artifact_runtime_unavailable`，不会覆盖原文件。
 
 与 `literature-search-organizer` 联动，把正文保存到检索阶段创建的编号目录：
 

@@ -4,4 +4,3 @@ from .pipeline import Harvester
 
 __all__ = ["Harvester"]
 __version__ = "0.1.0"
-

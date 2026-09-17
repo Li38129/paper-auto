@@ -19,7 +19,7 @@
 
 ## 3. 分阶段范围
 
-### 阶段一：正文下载 MVP（本版本）
+### 阶段一：正文下载与 Elsevier P0（已实现）
 
 - DOI URL/裸 DOI 规范化、校验、去重；
 - Crossref 元数据与正文链接；
@@ -29,6 +29,9 @@
 - 本地 PDF 缓存和可选集中批次报告；
 - Playwright 持久化浏览器兜底；
 - 对安全验证、登录、无订阅权限分别给出状态。
+- Windows 当前用户 DPAPI 全局 Elsevier API 配置；
+- Elsevier FULL XML、正文 EID 选择、object API 与结构化 PDF 校验；
+- direct-first、可选代理回退及完整阶段尝试记录。
 
 验收标准：
 
@@ -78,7 +81,7 @@
 
 实现方式采用现有 `literature-search-organizer` Skill 联动：当用户授权创建编号目录后，Skill 在项目运行区生成一次性任务文件，自动调用下载器，并依据集中报告完成一次授权重试。检索规则和下载器仍各自独立，可单独测试和升级。
 
-### 阶段四：规模化与可观测性
+### 阶段四：规模化与可观测性（已实现核心能力）
 
 - SQLite 作业队列与断点续跑；
 - 按出版社限速、指数退避和 `Retry-After`；
@@ -86,6 +89,8 @@
 - SHA-256 去重、PDF 元数据核验、损坏文件隔离；
 - 可导出的 CSV/JSON 报告与失败重试清单；
 - 针对出版社页面变化的选择器回归测试。
+
+已实现 SQLite 作业队列、任务心跳、stalled 恢复、取消、阶段日志、单 profile Broker、21 家出版社 Profile、MCP 工具和 doctor。跨出版社并发、导出 CSV 及更多选择器回归仍留作后续增强。
 
 ## 4. 模块边界
 
@@ -97,6 +102,12 @@
 | `browser.py` | 持久化浏览器会话、登录/挑战状态 |
 | `pipeline.py` | 候选排序、PDF 缓存与回退 |
 | `cli.py` | 批量输入、参数、退出码与可选集中报告 |
+| `config.py` / `elsevier.py` | DPAPI 凭据与 Elsevier API 下载链 |
+| `publisher_profiles.py` | 21 家出版社识别、入口与支持等级 |
+| `job_store.py` / `job_runner.py` | SQLite 任务、恢复、心跳与报告 |
+| `broker.py` | profile 单实例后台任务串行化 |
+| `mcp_server.py` | Agent 搜索、下载、状态和 Excel 工具 |
+| `doctor.py` | 本地无副作用诊断与可选网络探针 |
 
 ## 5. 失败状态设计
 
