@@ -20,7 +20,7 @@
 ## 安装
 
 项目以 Windows 为正式支持平台，需要 PowerShell、`uv`，以及 Chrome 或 Edge。
-统一启动脚本会把虚拟环境和缓存放到工作区的 `tmp\doi-harvester`，不会在项目目录创建 `.venv`：
+统一启动脚本会把虚拟环境、缓存和批次交换文件放到工作区的 `temp\doi-harvester`，不会在项目根目录创建 `.venv`、`.coverage` 或 `.pytest_cache`：
 
 ```powershell
 git clone https://github.com/Li38129/paper-auto.git
@@ -46,6 +46,8 @@ cd paper-auto
 $autopaper-literature 检索近五年 LPSC 氧掺杂实验论文，按室温离子电导率排序，
 保存到 C:\papers\LPSC，并自动下载可合法获取的正文。
 ```
+
+调用时如果已经给出论文根目录的绝对路径，Skill 会直接使用并在开始时复述；如果没有给出路径，Skill 会先要求提供一个绝对路径，再开始检索。论文根目录用于长期保存 Excel、编号目录和 PDF，不应指向项目的 `temp`。
 
 Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇总.xlsx`、
 创建稳定编号目录、调用 DOI Harvester，并把 `downloaded`、`cached` 或失败原因回写工作簿。
@@ -77,13 +79,13 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
-  --papers-file "$PWD\tmp\doi-harvester\jobs\<任务ID>\papers.json" `
+  --papers-file "$PWD\temp\doi-harvester\jobs\<任务ID>\papers.json" `
   --output-dir "C:\papers" `
   --browser-fallback
 ```
 
 `papers.json` 中每条记录需包含 `rank`、`doi`、`title` 和绝对路径
-`folder_path`。交换文件放在 `tmp\doi-harvester\jobs`，不要放入论文数据目录。
+`folder_path`。交换文件放在 `temp\doi-harvester\jobs`，不要放入论文数据目录。
 默认只下载期刊正文；只有显式传入 `--supplements` 时才会下载补充材料。
 
 ACS/其他需要已有订阅会话的出版社：
@@ -108,7 +110,7 @@ ACS/其他需要已有订阅会话的出版社：
   --browser-fallback
 ```
 
-浏览器配置会保存在 `tmp\doi-harvester\profiles\default`，后续运行复用 Cookie、站点存储和机构授权状态。
+浏览器配置会保存在 `temp\doi-harvester\profiles\default`，后续运行复用 Cookie、站点存储和机构授权状态。
 显式传入 `--profile-dir` 仍可覆盖默认位置。程序不会自动填写凭据、处理验证码或绕过订阅限制。请勿把 `--profile-dir` 指向日常 Chrome 的默认用户目录；同一配置目录也不能被两个下载任务同时使用。
 
 启动脚本会在浏览器未运行时保守清理网页缓存、着色器缓存、扩展文件和浏览器模型，保留登录会话所需的 Cookies、Local/Session Storage、IndexedDB、Preferences 与 Local State。也可手动维护：
@@ -119,7 +121,12 @@ ACS/其他需要已有订阅会话的出版社：
 
 # 同时清理可重建的 uv、pytest、Ruff 和 coverage 缓存
 .\scripts\prune-runtime.ps1 -IncludePackageCaches
+
+# 注册每周日 03:00 执行的 Windows 定时清理任务
+.\scripts\register-temp-cleanup.ps1
 ```
+
+定时清理默认删除 30 天前且已全部成功的下载任务，以及 `temp\work` 中 7 天前的可丢弃构建产物。失败任务、Excel 尚未成功回写的批次报告、浏览器登录会话和当前虚拟环境不会被定时删除。可以用 `-RetentionDays` 和 `-At HH:mm` 调整保留期与执行时间；包管理和测试缓存只通过上面的手动命令清理，避免与正在运行的任务冲突。
 
 可能的授权状态：
 
@@ -149,9 +156,9 @@ downloads/
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
-  --papers-file "$PWD\tmp\doi-harvester\jobs\<任务ID>\papers.json" `
+  --papers-file "$PWD\temp\doi-harvester\jobs\<任务ID>\papers.json" `
   --output-dir "C:\papers" `
-  --report-dir "$PWD\tmp\doi-harvester\jobs\<任务ID>"
+  --report-dir "$PWD\temp\doi-harvester\jobs\<任务ID>"
 ```
 
 此时只会在任务目录写入集中报告，论文编号目录仍只保存正文。Skill 联动仅在全部下载成功、PDF 校验通过且报告已写回 Excel 后删除任务目录；若有失败则保留，供定向重试和审查。
@@ -170,10 +177,24 @@ downloads/
 
 ```powershell
 $env:DOI_HARVESTER_NETWORK_TESTS = "1"
-$env:UV_PROJECT_ENVIRONMENT = "$PWD\tmp\doi-harvester\venv"
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\temp\doi-harvester\venv"
 uv run --project . --extra dev pytest -m network
 ```
 
 网络测试不默认启用浏览器兜底，因此受限 ACS 论文需要用上面的 CLI 浏览器命令验收。
 
 完整产品路线见 [docs/PRODUCT_PLAN.md](docs/PRODUCT_PLAN.md)。
+
+## 项目目录约定
+
+```text
+.agents/skills/     Codex 仓库级技能及 Excel 模板
+docs/               产品与验收文档
+examples/           可复用的最小输入示例
+scripts/            启动、检查和临时目录维护脚本
+src/                Python 包源码
+tests/              自动化测试
+temp/               被 Git 忽略的运行环境、缓存、交换文件和临时构建产物
+```
+
+长期成果只放在用户指定的论文根目录；项目根目录只保留源码和维护文件。升级前版本使用的 `tmp\doi-harvester` 会在新版启动器首次运行且 `temp\doi-harvester` 尚不存在时自动迁移。旧虚拟环境因包含绝对路径会被转存到 `temp\work` 等待清理，随后由 `uv` 在新位置自动重建；任务报告和浏览器会话会继续保留。

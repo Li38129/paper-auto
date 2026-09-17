@@ -1,6 +1,6 @@
 interface:
   display_name: "AutoPaper 文献检索与下载"
   short_description: "检索筛选文献、维护Excel汇总清单并自动下载合法期刊正文"
-  default_prompt: "Use $autopaper-literature to search, organize, index, and download papers for my research topic."
+  default_prompt: "Use $autopaper-literature to confirm my target folder, then search, organize, index, and download papers for my research topic."
 policy:
   allow_implicit_invocation: true

@@ -13,10 +13,12 @@
 解析成功后使用：
 
 - 启动脚本：`<项目根目录>\scripts\doi-harvester.ps1`
-- 任务根目录：`<项目根目录>\tmp\doi-harvester\jobs`
-- 浏览器配置：`<项目根目录>\tmp\doi-harvester\profiles\default`
+- 任务根目录：`<项目根目录>\temp\doi-harvester\jobs`
+- 浏览器配置：`<项目根目录>\temp\doi-harvester\profiles\default`
 
 每次创建唯一任务目录，名称使用安全时间戳和简短主题，例如 `20260917-143015-solid-electrolyte`。任务目录必须解析为任务根目录的子目录。
+
+`temp` 只保存可恢复的运行环境、浏览器会话缓存、交换文件和任务报告。论文根目录、Excel 与下载的 PDF 不得放入该目录。运行入口会保守清理过期成功任务和可再生成缓存；失败任务、未完成 Excel 回写的报告和登录会话数据必须保留。
 
 ## 生成下载清单
 

@@ -1,5 +1,9 @@
 param(
-    [string]$RuntimeRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmp\doi-harvester"),
+    [string]$RuntimeRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) "temp\doi-harvester"),
+    [ValidateRange(1, 3650)]
+    [int]$RetentionDays = 30,
+    [ValidateRange(1, 3650)]
+    [int]$WorkRetentionDays = 7,
     [switch]$IncludePackageCaches
 )
 
@@ -29,6 +33,29 @@ function Remove-GeneratedDirectory {
     [System.IO.Directory]::Delete($resolvedPath, $true)
 }
 
+function Remove-GeneratedFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [Parameter(Mandatory)]
+        [string]$AllowedRoot
+    )
+
+    if (-not [System.IO.File]::Exists($Path)) {
+        return
+    }
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $resolvedRoot = [System.IO.Path]::GetFullPath($AllowedRoot)
+    $rootPrefix = $resolvedRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + `
+        [System.IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "拒绝清理临时目录之外的文件：$resolvedPath"
+    }
+
+    [System.IO.File]::Delete($resolvedPath)
+}
+
 function Test-ProfileActive {
     param([Parameter(Mandatory)][string]$ProfileRoot)
 
@@ -55,6 +82,7 @@ function Test-ProfileActive {
 }
 
 $runtimeFull = [System.IO.Path]::GetFullPath($RuntimeRoot)
+$tempRoot = Split-Path -Parent $runtimeFull
 $profileRoot = Join-Path $runtimeFull "profiles\default"
 
 if (Test-ProfileActive -ProfileRoot $profileRoot) {
@@ -104,7 +132,7 @@ else {
 }
 
 $jobsRoot = Join-Path $runtimeFull "jobs"
-$cutoff = (Get-Date).AddDays(-30)
+$cutoff = (Get-Date).AddDays(-$RetentionDays)
 if (Test-Path -LiteralPath $jobsRoot) {
     foreach ($jobDirectory in Get-ChildItem -LiteralPath $jobsRoot -Directory -Force) {
         if ($jobDirectory.LastWriteTime -ge $cutoff) {
@@ -123,6 +151,23 @@ if (Test-Path -LiteralPath $jobsRoot) {
         }
         catch {
             Write-Warning "无法解析任务报告，保留目录：$($jobDirectory.FullName)"
+        }
+    }
+}
+
+# `temp\work` 只允许存放可丢弃的构建和转换产物，按最后修改时间清理。
+$workRoot = Join-Path $tempRoot "work"
+$workCutoff = (Get-Date).AddDays(-$WorkRetentionDays)
+if (Test-Path -LiteralPath $workRoot) {
+    foreach ($item in Get-ChildItem -LiteralPath $workRoot -Force) {
+        if ($item.LastWriteTime -ge $workCutoff) {
+            continue
+        }
+        if ($item.PSIsContainer) {
+            Remove-GeneratedDirectory -Path $item.FullName -AllowedRoot $workRoot
+        }
+        else {
+            Remove-GeneratedFile -Path $item.FullName -AllowedRoot $workRoot
         }
     }
 }

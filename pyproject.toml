@@ -29,6 +29,7 @@ packages = ["src/doi_harvester"]
 [tool.pytest.ini_options]
 addopts = ["--strict-markers", "--cov=doi_harvester", "--cov-report=term-missing"]
 testpaths = ["tests"]
+cache_dir = "temp/doi-harvester/dev-cache/pytest"
 markers = [
   "network: 访问真实出版社与元数据服务的慢速测试",
 ]
@@ -36,11 +37,12 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["doi_harvester"]
+data_file = "temp/doi-harvester/dev-cache/.coverage"
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude = ["tmp"]
+exclude = ["temp", "tmp"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

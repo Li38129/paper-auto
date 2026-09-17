@@ -9,4 +9,6 @@ downloads/
 acceptance-downloads/
 acceptance-browser-profile*/
 .profiles/
-tmp/
+/temp/
+# 兼容升级前的旧运行目录；启动器会在条件允许时迁移
+/tmp/

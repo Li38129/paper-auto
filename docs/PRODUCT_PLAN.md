@@ -11,7 +11,7 @@
 ```text
 研究主题
   → literature-search-organizer 检索、筛选、去重、排序
-  → tmp/doi-harvester/jobs/papers.json（序号、DOI、题名、目标目录）
+  → temp/doi-harvester/jobs/papers.json（序号、DOI、题名、目标目录）
   → DOI Harvester 下载正文
   → 每篇目录中只保存 article.pdf
   → 可选 temp/batch-report.json 汇总审查信息
