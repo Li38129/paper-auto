@@ -146,14 +146,16 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 .\scripts\doi-harvester.ps1 download `
   --papers-file "$PWD\temp\doi-harvester\jobs\<任务ID>\papers.json" `
   --output-dir "C:\papers" `
-  --browser-fallback
+  --browser-fallback `
+  --challenge-policy pause `
+  --challenge-timeout 600
 ```
 
 `papers.json` 中每条记录需包含 `rank`、`doi`、`title` 和绝对路径
 `folder_path`。交换文件放在 `temp\doi-harvester\jobs`，不要放入论文数据目录。
 默认只下载期刊正文；只有显式传入 `--supplements` 时才会下载补充材料。
 
-ACS/其他需要已有订阅会话的出版社：
+ACS 或 Elsevier 等需要已有订阅会话的出版社：
 
 ```powershell
 .\scripts\doi-harvester.ps1 auth `
@@ -162,9 +164,15 @@ ACS/其他需要已有订阅会话的出版社：
   --auth-timeout 600
 ```
 
+Elsevier 可把 `--publisher acs` 替换为 `--publisher elsevier`。前台可见下载遇到
+`challenge_required` 或 `authentication_required` 时默认暂停最多 600 秒，不再切换到下一篇；
+`--challenge-policy skip` 可恢复原来的跳过行为，`fail-fast` 会停止后续 DOI。无头模式和
+`--detach` 后台任务默认不等待，后台任务会停在 `waiting_for_user`，完成授权后用
+`jobs resume <任务ID>` 恢复。
+
 请在打开的可见 Chrome/Edge 中亲自完成安全验证和学校 SSO。程序会检测页面状态，只有 PDF 入口连续三次稳定出现才会确认 `ready`，不会再依赖固定等待时间。
 
-`--cdp` 会让普通 Chrome 在授权命令结束后继续保持打开，下载命令自动读取 `auth-state.json` 中的本地 CDP 地址并连接同一进程。这可以避免 ACS 在浏览器重启后重新触发安全验证。完成批次后可以直接关闭该专用 Chrome 窗口。
+`--cdp` 会让普通 Chrome 在授权命令结束后继续保持打开，下载命令自动读取 `auth-state.json` 中的本地 CDP 地址并连接同一进程。下载器复用当前工作标签页和同一配置中的 Cookie、Local Storage 与 IndexedDB，避免不断新建标签或在浏览器重启后重新触发安全验证。完成批次后可以直接关闭该专用 Chrome 窗口。
 
 授权完成后复用同一浏览器配置下载：
 

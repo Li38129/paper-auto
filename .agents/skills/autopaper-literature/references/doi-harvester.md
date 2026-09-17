@@ -48,9 +48,10 @@
 
 ```powershell
 & '<项目根目录>\scripts\doi-harvester.ps1' elsevier-setup --show
+& '<项目根目录>\scripts\doi-harvester.ps1' elsevier-setup --validate
 ```
 
-若 API Key 未配置，说明可以运行 `elsevier-setup --set-key --validate` 完成一次性配置；不得索要或代填密钥。Key 缺失不会阻断 OpenAlex、出版社入口和浏览器回退。
+若 API Key 未配置，说明可以运行 `elsevier-setup --set-key --validate` 完成一次性配置；不得索要或代填密钥。Key 缺失不会阻断 OpenAlex、出版社入口和浏览器回退。若验证返回 HTTP 403 及 `Requestor configuration settings insufficient`，表示该 Key 已被程序读取，但尚未获准访问 Elsevier Article Retrieval/ScienceDirect API；校园网网页访问权限不会自动赋予开发者 API 权限。此时优先让用户在 Elsevier Developer Portal 为现有 Key 补充相应 API 权限，不必立即新建 Key；只有旧 Key 无法修改权限或已经失效时才重新申请。
 
 ```powershell
 & '<项目根目录>\scripts\doi-harvester.ps1' download `
@@ -58,10 +59,12 @@
   --output-dir '<论文根目录>' `
   --report-dir '<任务目录>' `
   --browser-fallback `
+  --challenge-policy pause `
+  --challenge-timeout 600 `
   --delay 1
 ```
 
-任务较多时增加 `--detach`，记录返回的 `job_id`，再用 `jobs status <job_id>` 监控直至终态。任务变为 `stalled` 时只运行一次 `jobs resume <job_id>`；不要重建编号目录或重新编号。
+前台可见下载遇到验证页时保持当前工作标签并等待用户，验证完成前不得切换下一篇。任务较多时增加 `--detach`，记录返回的 `job_id`，再用 `jobs status <job_id>` 监控直至终态。后台任务遇验证时进入 `waiting_for_user` 并保留后续条目；完成授权后运行一次 `jobs resume <job_id>`。任务变为 `stalled` 时也只恢复一次；不要重建编号目录或重新编号。
 
 如果 AutoPaper MCP 已注册，可用 `download` 创建相同任务，并用 `job_status` 等待终态。`papers_file`、`output_dir` 和可选 `report_dir` 必须是绝对路径；`report_dir` 只能位于 `<项目根目录>\temp\doi-harvester\jobs`。
 
@@ -71,13 +74,25 @@
 
 - `subscription_required`：机构没有正文权限，作为最终失败，不重试。
 - 普通失败：保留任务目录并报告，不循环重试。
-- `challenge_required` 或 `authentication_required`：等待首次批次完成其他论文后，只对这些失败项进行一次人工授权和一次重试。
+- `challenge_required` 或 `authentication_required`：前台保持当前页面等待；后台进入 `waiting_for_user`，人工授权后只恢复一次。
 
-ACS 授权命令：
+ACS/Elsevier 授权命令：
 
 ```powershell
 & '<项目根目录>\scripts\doi-harvester.ps1' auth `
   --publisher acs `
+  --doi '<首个失败 DOI>' `
+  --cdp `
+  --auth-timeout 600
+```
+
+Elsevier 将 `--publisher acs` 替换为 `--publisher elsevier`。优先验证并使用 Elsevier API；只有 API 未覆盖或失败时才启用浏览器授权。`--cdp` 浏览器必须保持打开，后续下载复用同一进程、工作标签页和持久化配置。
+
+Elsevier 浏览器授权示例：
+
+```powershell
+& '<项目根目录>\scripts\doi-harvester.ps1' auth `
+  --publisher elsevier `
   --doi '<首个失败 DOI>' `
   --cdp `
   --auth-timeout 600

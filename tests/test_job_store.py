@@ -100,3 +100,22 @@ def test_resume_resets_only_retryable_items(tmp_path: Path) -> None:
     assert count == 1
     assert job["counts"] == {"downloaded": 1, "pending": 1}
     assert job["status"] == "queued"
+
+
+def test_resume_resets_auth_required_items(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=sample_records(tmp_path),
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=True,
+    )
+    store.set_item_status(job_id, "10.1000/one", "auth_required")
+    store.set_job_status(job_id, "waiting_for_user")
+
+    count = store.prepare_resume(job_id)
+
+    job = store.get_job(job_id)
+    assert count == 1
+    assert job["counts"] == {"pending": 2}
+    assert job["status"] == "queued"

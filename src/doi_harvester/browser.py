@@ -285,10 +285,11 @@ def _matches_expected_article_url(url: str, expected_urls: set[str]) -> bool:
 
 
 class BrowserAuthorizer:
-    """在专用持久化浏览器配置中初始化合法 ACS 会话。"""
+    """在专用持久化浏览器配置中初始化合法出版社会话。"""
 
     publisher_probe_dois = {
         "acs": "10.1021/acs.chemmater.9b01639",
+        "elsevier": "10.1016/j.watres.2024.121507",
     }
 
     def __init__(
@@ -520,12 +521,21 @@ class BrowserPdfDownloader:
         headless: bool = False,
         timeout_seconds: float = 60.0,
         interactive_wait_seconds: float = 0.0,
+        challenge_policy: str = "skip",
+        challenge_timeout_seconds: float = 600.0,
     ) -> None:
         self.profile_dir = profile_dir or self._default_profile_dir()
         self.channel = channel if channel is not None else self._default_channel()
         self.headless = headless
         self.timeout_ms = int(timeout_seconds * 1000)
         self.interactive_wait_seconds = max(interactive_wait_seconds, 0.0)
+        if challenge_policy not in {"pause", "skip", "fail-fast"}:
+            raise ValueError(f"未知验证页处理策略：{challenge_policy}")
+        self.challenge_policy = challenge_policy
+        self.challenge_timeout_seconds = max(challenge_timeout_seconds, 0.0)
+        if self.interactive_wait_seconds > 0:
+            self.challenge_policy = "pause"
+            self.challenge_timeout_seconds = self.interactive_wait_seconds
 
     def download(
         self,
@@ -622,8 +632,8 @@ class BrowserPdfDownloader:
         candidate_urls: list[str],
     ) -> Attempt:
         doi_url = f"https://doi.org/{doi}"
-        # 下载任务使用独立标签，避免误选 Edge/Codex 扩展侧栏。
-        page = context.new_page()
+        # 复用同一网页标签，避免批量下载时不断抢占前台并积累验证页。
+        page = _content_page_or_new(context)
         page.set_default_timeout(self.timeout_ms)
         page.goto(doi_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
         page.wait_for_timeout(3000)
@@ -632,15 +642,16 @@ class BrowserPdfDownloader:
         if (
             page_status in {"challenge_required", "authentication_required"}
             and not self.headless
-            and self.interactive_wait_seconds
+            and self.challenge_policy == "pause"
+            and self.challenge_timeout_seconds
         ):
             LOGGER.warning(
                 "浏览器正在等待用户完成站点验证/登录（最多 %.0f 秒）。",
-                self.interactive_wait_seconds,
+                self.challenge_timeout_seconds,
             )
             page_status = wait_for_authorization(
                 page,
-                timeout_seconds=self.interactive_wait_seconds,
+                timeout_seconds=self.challenge_timeout_seconds,
             )
         if page_status in {"challenge_required", "authentication_required"}:
             return Attempt(

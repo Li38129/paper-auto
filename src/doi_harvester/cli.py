@@ -76,7 +76,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--interactive-wait",
         type=float,
         default=0.0,
-        help="兼容参数；推荐先使用 auth 子命令初始化会话。",
+        help="兼容参数；大于零时等价于 pause 策略并覆盖挑战等待秒数。",
+    )
+    download.add_argument(
+        "--challenge-policy",
+        choices=["pause", "skip", "fail-fast"],
+        help="验证页处理策略；前台默认 pause，后台或无头模式默认 skip。",
+    )
+    download.add_argument(
+        "--challenge-timeout",
+        type=float,
+        default=600.0,
+        help="pause 策略等待用户完成验证或登录的最长秒数。",
     )
     download.add_argument("--delay", type=float, default=1.0, help="不同 DOI 之间的等待秒数。")
     download.add_argument("--verbose", action="store_true", help="输出调试日志。")
@@ -85,7 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     auth = subparsers.add_parser("auth", help="在专用浏览器配置中初始化出版社授权会话。")
-    auth.add_argument("--publisher", choices=["acs"], required=True, help="要初始化的出版社。")
+    auth.add_argument(
+        "--publisher",
+        choices=["acs", "elsevier"],
+        required=True,
+        help="要初始化的出版社。",
+    )
     auth.add_argument("--doi", help="用于验证访问权限的 DOI；不填时使用内置探针 DOI。")
     auth.add_argument("--profile-dir", type=Path, help="专用持久化浏览器配置目录。")
     auth.add_argument("--browser-channel", default=None, help="Chrome/Edge 浏览器通道。")
@@ -265,9 +281,17 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, InvalidDoiError, PapersFileError) as exc:
         raise SystemExit(str(exc)) from exc
 
+    challenge_policy = args.challenge_policy
+    if challenge_policy is None:
+        challenge_policy = "skip" if args.headless or args.detach else "pause"
+    challenge_timeout = (
+        args.interactive_wait if args.interactive_wait > 0 else args.challenge_timeout
+    )
     browser_options = {
         "headless": args.headless,
         "interactive_wait_seconds": args.interactive_wait,
+        "challenge_policy": challenge_policy,
+        "challenge_timeout_seconds": challenge_timeout,
     }
     if args.browser_channel is not None:
         browser_options["channel"] = args.browser_channel
@@ -337,6 +361,13 @@ def main(argv: list[str] | None = None) -> int:
         serialized.append(result_payload)
         marker = "成功" if result.success else "失败"
         print(f"[{marker}] {doi} -> {result.pdf_path or result.article_dir}")
+        reason = result.reason or result.status
+        if (
+            challenge_policy == "fail-fast"
+            and reason in {"challenge_required", "authentication_required"}
+        ):
+            print("检测到需要人工验证的页面，已按 fail-fast 策略停止后续 DOI。")
+            break
         if index < len(tasks) - 1 and args.delay > 0:
             time.sleep(args.delay)
 

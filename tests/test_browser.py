@@ -121,8 +121,10 @@ class FakeContext:
         self.title = title
         self.pages = [FakePage(title=title)]
         self.request = FakeRequest(body)
+        self.new_page_calls = 0
 
     def new_page(self) -> FakePage:
+        self.new_page_calls += 1
         return FakePage(title=self.title)
 
     def close(self) -> None:
@@ -231,6 +233,57 @@ def test_browser_surfaces_cloudflare_challenge(
 
     assert result.success is False
     assert result.reason == "challenge_required"
+
+
+def test_browser_pause_policy_waits_on_challenge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from doi_harvester import browser as browser_module
+
+    body = b"%PDF-1.7\n" + b"x" * 2048
+    page = SignalPage(title="Just a moment...")
+    install_fake_playwright(monkeypatch, body=body, page=page)
+    waits: list[float] = []
+
+    def fake_wait(_page: object, *, timeout_seconds: float) -> str:
+        waits.append(timeout_seconds)
+        return "ready"
+
+    monkeypatch.setattr(browser_module, "wait_for_authorization", fake_wait)
+    destination = tmp_path / "article.pdf"
+    downloader = BrowserPdfDownloader(
+        profile_dir=tmp_path / "profile",
+        challenge_policy="pause",
+        challenge_timeout_seconds=42,
+    )
+
+    result = downloader.download(
+        doi="10.1000/example",
+        destination=destination,
+        candidate_urls=["https://publisher.test/article.pdf"],
+    )
+
+    assert waits == [42]
+    assert result.success is True
+    assert destination.read_bytes() == body
+
+
+def test_browser_reuses_existing_work_page(tmp_path: Path) -> None:
+    body = b"%PDF-1.7\n" + b"x" * 2048
+    context = FakeContext(body=body)
+    destination = tmp_path / "article.pdf"
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path / "profile")
+
+    result = downloader._download_in_context(
+        context=context,
+        doi="10.1000/example",
+        destination=destination,
+        temporary=tmp_path / "article.pdf.part",
+        candidate_urls=["https://publisher.test/article.pdf"],
+    )
+
+    assert result.success is True
+    assert context.new_page_calls == 0
 
 
 @pytest.mark.parametrize(

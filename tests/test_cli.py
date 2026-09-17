@@ -161,6 +161,87 @@ def test_main_keeps_partial_failure_in_explicit_report(
     ]
 
 
+def test_foreground_browser_fallback_defaults_to_pause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    options: dict[str, object] = {}
+
+    class FakeHarvester:
+        def __init__(self, **kwargs: object) -> None:
+            options.update(kwargs)
+
+        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+            del overwrite
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status="challenge_required",
+                article_dir=tmp_path,
+            )
+
+    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+
+    exit_code = cli.main(
+        [
+            "download",
+            "--doi",
+            "10.1000/example",
+            "--output-dir",
+            str(tmp_path),
+            "--browser-fallback",
+            "--delay",
+            "0",
+        ]
+    )
+
+    assert exit_code == 2
+    browser_options = options["browser_options"]
+    assert isinstance(browser_options, dict)
+    assert browser_options["challenge_policy"] == "pause"
+    assert browser_options["challenge_timeout_seconds"] == 600
+
+
+def test_fail_fast_stops_after_auth_challenge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    class FakeHarvester:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+            del overwrite
+            calls.append(doi)
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status="challenge_required",
+                article_dir=tmp_path,
+            )
+
+    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+
+    exit_code = cli.main(
+        [
+            "download",
+            "--doi",
+            "10.1000/one",
+            "--doi",
+            "10.1000/two",
+            "--output-dir",
+            str(tmp_path),
+            "--challenge-policy",
+            "fail-fast",
+            "--delay",
+            "0",
+        ]
+    )
+
+    assert exit_code == 2
+    assert calls == ["10.1000/one"]
+
+
 def test_main_downloads_papers_file_into_numbered_folders(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -269,6 +350,35 @@ def test_auth_command_initializes_persistent_session(
 
     assert exit_code == 0
     assert calls["authorize"] == ("acs", "10.1021/example", 10.0)
+
+
+def test_auth_command_accepts_elsevier_publisher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    class FakeAuthorizer:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def authorize(
+            self, *, publisher: str, doi: str | None, timeout_seconds: float
+        ) -> AuthorizationResult:
+            del doi, timeout_seconds
+            calls.append(publisher)
+            return AuthorizationResult(
+                success=True,
+                status="ready",
+                final_url="https://www.sciencedirect.com/",
+                profile_dir=tmp_path / "profile",
+            )
+
+    monkeypatch.setattr(cli, "BrowserAuthorizer", FakeAuthorizer)
+
+    exit_code = cli.main(["auth", "--publisher", "elsevier"])
+
+    assert exit_code == 0
+    assert calls == ["elsevier"]
 
 
 def test_elsevier_setup_uses_hidden_input_and_masks_secret(

@@ -265,7 +265,7 @@ function updateRowMap(rows) {
   return { byDoi, byTitle };
 }
 
-function upsertRecords(rows, payload, workbookPath) {
+function upsertRecords(rows, payload, workbookPath, folderRoot) {
   validateExistingRows(rows);
   const timestamp = nowText();
   let maxSequence = rows.reduce((maximum, row) => {
@@ -325,7 +325,7 @@ function upsertRecords(rows, payload, workbookPath) {
       rank: record.rank,
       sequence: Number(row["序号"]),
       folder_name: folderName,
-      folder_path: path.resolve(path.dirname(workbookPath), folderName),
+      folder_path: path.resolve(folderRoot, folderName),
       title: row["论文题名"],
       doi: row.DOI,
     });
@@ -416,6 +416,9 @@ async function main() {
   const reportPath = args.get("report") ? path.resolve(args.get("report")) : null;
   const resolvedPath = args.get("resolved") ? path.resolve(args.get("resolved")) : null;
   const templatePath = args.get("template") ? path.resolve(args.get("template")) : DEFAULT_TEMPLATE;
+  const folderRoot = args.get("folder-root")
+    ? path.resolve(args.get("folder-root"))
+    : path.dirname(workbookPath);
 
   if (!recordsPath && !reportPath) {
     throw new Error("必须提供 --records 或 --report。");
@@ -438,7 +441,7 @@ async function main() {
 
   if (recordsPath) {
     const recordsPayload = validateRecordsPayload(await readJson(recordsPath));
-    resolved = upsertRecords(rows, recordsPayload, workbookPath);
+    resolved = upsertRecords(rows, recordsPayload, workbookPath, folderRoot);
   }
   if (reportPath) {
     const results = validateReportPayload(await readJson(reportPath));

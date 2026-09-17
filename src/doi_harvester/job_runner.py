@@ -76,7 +76,12 @@ def run_job(
     job = active_store.get_job(job_id)
     active_store.set_job_status(job_id, "running")
     browser_options = (
-        {"profile_dir": Path(str(job["profile_dir"]))} if job.get("profile_dir") else None
+        {
+            "profile_dir": Path(str(job["profile_dir"])),
+            "challenge_policy": "skip",
+        }
+        if job.get("profile_dir")
+        else {"challenge_policy": "skip"}
     )
     worker = harvester or Harvester(
         output_dir=Path(str(job["output_dir"])),
@@ -109,6 +114,9 @@ def run_job(
                 )
             active_store.record_result(job_id, doi, result)
             active_store.heartbeat(job_id)
+            reason = result.reason or result.status
+            if reason in {"challenge_required", "authentication_required"}:
+                break
         status = active_store.finalize_job(job_id)
     except Exception as exc:
         active_store.set_job_status(job_id, "failed", error=str(exc))

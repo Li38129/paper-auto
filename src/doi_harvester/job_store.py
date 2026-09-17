@@ -18,6 +18,7 @@ JOB_STATUSES = {
     "queued",
     "running",
     "stalled",
+    "waiting_for_user",
     "needs_attention",
     "completed",
     "failed",
@@ -198,7 +199,13 @@ class JobStore:
         if status == "running":
             fields.append("started_at = COALESCE(started_at, ?)")
             values.append(timestamp)
-        if status in {"completed", "failed", "canceled", "needs_attention"}:
+        if status in {
+            "completed",
+            "failed",
+            "canceled",
+            "waiting_for_user",
+            "needs_attention",
+        }:
             fields.append("finished_at = ?")
             values.append(timestamp)
         values.append(job_id)
@@ -319,7 +326,7 @@ class JobStore:
             cursor = connection.execute(
                 """
                 UPDATE job_items SET status = 'pending', updated_at = ?
-                WHERE job_id = ? AND status IN ('retryable', 'running')
+                WHERE job_id = ? AND status IN ('retryable', 'running', 'auth_required')
                 """,
                 (timestamp, job_id),
             )
@@ -354,10 +361,11 @@ class JobStore:
         counts = job["counts"]
         if counts and set(counts) <= {"downloaded", "cached"}:
             status = "completed"
+        elif counts.get("auth_required"):
+            status = "waiting_for_user"
         elif any(
             counts.get(name)
             for name in (
-                "auth_required",
                 "subscription_required",
                 "failed",
                 "retryable",
