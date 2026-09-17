@@ -7,6 +7,7 @@ from doi_harvester.models import (
     ArticleMetadata,
     Attempt,
     DownloadCandidate,
+    DownloadResult,
     SupplementArtifact,
 )
 from doi_harvester.pipeline import Harvester
@@ -184,6 +185,21 @@ def test_pipeline_reports_failure_without_creating_pdf(tmp_path: Path) -> None:
     assert result.success is False
     assert result.pdf_path is None
     assert list(result.article_dir.iterdir()) == []
+
+
+def test_pipeline_classifies_elsevier_api_configuration_error(tmp_path: Path) -> None:
+    result = DownloadResult(
+        doi="10.1016/example",
+        success=False,
+        status="api_configuration_error",
+        article_dir=tmp_path,
+    )
+
+    Harvester._classify_result(result)
+
+    assert result.outcome == "config_needed"
+    assert result.next_action is not None
+    assert "Article Retrieval" in result.next_action.message
 
 
 def test_pipeline_uses_valid_cache(tmp_path: Path) -> None:

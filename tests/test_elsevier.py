@@ -140,6 +140,32 @@ def test_elsevier_client_uses_proxy_after_direct_not_entitled(tmp_path: Path) ->
     assert calls[-1]["proxies"]["https"] == "http://proxy.test:8080"
 
 
+def test_elsevier_authentication_error_is_configuration_error(tmp_path: Path) -> None:
+    response_status = (
+        "AUTHENTICATION_ERROR - Requestor configuration settings insufficient "
+        "for access to this resource."
+    )
+    responses_by_session = [
+        [FakeResponse(403, headers={"X-ELS-Status": response_status})],
+        [FakeResponse(403, headers={"X-ELS-Status": response_status})],
+    ]
+    calls: list[dict[str, Any]] = []
+
+    def factory() -> FakeSession:
+        return FakeSession(responses_by_session.pop(0), calls)
+
+    result = ElsevierApiClient(session_factory=factory).download(
+        doi="10.1016/example",
+        destination=tmp_path / "article.pdf",
+        api_key="secret",
+        proxy_url="http://proxy.test:8080",
+    )
+
+    assert result.success is False
+    assert result.reason == "api_configuration_error"
+    assert [attempt.route for attempt in result.attempts] == ["direct", "configured_proxy"]
+
+
 def test_elsevier_short_xml_is_warning_not_failure(tmp_path: Path) -> None:
     responses = [
         FakeResponse(

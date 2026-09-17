@@ -418,7 +418,14 @@ def _local_name(tag: str) -> str:
 
 
 def _http_reason(status_code: int, els_status: str) -> str:
-    if "NOT_ENTITLED" in els_status.upper():
+    normalized_status = els_status.upper()
+    if (
+        "AUTHENTICATION_ERROR" in normalized_status
+        or "INVALID_API_KEY" in normalized_status
+        or "REQUESTOR CONFIGURATION SETTINGS INSUFFICIENT" in normalized_status
+    ):
+        return "api_configuration_error"
+    if "NOT_ENTITLED" in normalized_status:
         return "not_entitled"
     if status_code in {401, 403}:
         return "not_entitled"
@@ -434,6 +441,7 @@ def _allows_route_fallback(attempt: Attempt) -> bool:
         "timeout",
         "ConnectionError",
         "ProxyError",
+        "api_configuration_error",
         "not_entitled",
         "http_400",
     }

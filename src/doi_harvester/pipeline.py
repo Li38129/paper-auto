@@ -224,16 +224,26 @@ class Harvester:
         reason = result.status or "failed"
         result.reason = reason
         result.quality = "none"
-        if reason in {"api_key_missing", "config_error", "playwright_not_installed"}:
+        if reason in {
+            "api_key_missing",
+            "api_configuration_error",
+            "config_error",
+            "playwright_not_installed",
+        }:
             result.outcome = "config_needed"
             command = (
                 "doi-harvester elsevier-setup --set-key --validate"
-                if reason in {"api_key_missing", "config_error"}
+                if reason in {"api_key_missing", "api_configuration_error", "config_error"}
                 else "uv sync --extra browser"
+            )
+            message = (
+                "Elsevier 拒绝了当前开发者应用配置，请检查 API Key 的 Article Retrieval 权限。"
+                if reason == "api_configuration_error"
+                else "完成所需本地配置后重试。"
             )
             result.next_action = NextAction(
                 kind="configure",
-                message="完成所需本地配置后重试。",
+                message=message,
                 command=command,
             )
         elif reason in {"challenge_required", "authentication_required"}:

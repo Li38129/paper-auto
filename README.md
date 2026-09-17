@@ -54,6 +54,11 @@ API Key 是当前 Windows 用户的全局配置，一次录入后可供所有 Au
 
 读取优先级为 `ELSEVIER_API_KEY` / `ELS_API_KEY` 环境变量，其次是 DPAPI 本地配置。网络先使用 `trust_env=False` 的 direct 路由，让校园网、学校 VPN 或规则 VPN 决定实际出口；只有配置了专用代理且 direct 遇到连接、超时或授权错误时才尝试代理。项目不保存校园账号，也不处理验证码。
 
+浏览器或 Windows 系统代理不会被 direct 路由自动继承；若规则 VPN 仅提供本机 HTTP
+代理，需要使用 `--proxy-url http://127.0.0.1:端口` 显式配置。返回
+`AUTHENTICATION_ERROR` 时会标记为 `api_configuration_error`，用于区分开发者应用/API
+权限配置问题与论文订阅不足；返回 `NOT_ENTITLED` 才标记为机构订阅问题。
+
 ## 在 Codex 中完成检索与下载
 
 仓库内置 `.agents\skills\autopaper-literature`。从本仓库或其子目录启动 Codex 后，

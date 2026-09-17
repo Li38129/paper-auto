@@ -442,6 +442,11 @@ def _run_elsevier_setup(args: argparse.Namespace) -> int:
         )
     if not result.success:
         print(f"[失败] Elsevier API 验证失败：{result.reason}")
+        if result.reason == "api_configuration_error":
+            print(
+                "请在 Elsevier Developer Portal 检查当前 Key 的 "
+                "ScienceDirect / Article Retrieval API 配置。"
+            )
         return 2
     warning = f"；警告：{','.join(result.warnings)}" if result.warnings else ""
     print(f"[成功] Elsevier XML/object-EID 下载链可用；来源：{result.source}{warning}")

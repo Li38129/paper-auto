@@ -333,3 +333,29 @@ def test_elsevier_setup_validate_does_not_keep_pdf(
     assert exit_code == 0
     assert len(destinations) == 1
     assert not destinations[0].exists()
+
+
+def test_elsevier_setup_explains_api_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class FakeStore:
+        path = tmp_path / "config.json"
+
+        def load(self) -> GlobalConfig:
+            return GlobalConfig(elsevier=ElsevierConfig(api_key="secret"))
+
+        def save(self, _config: GlobalConfig) -> None:
+            return None
+
+    class FakeElsevier:
+        def download(self, **_kwargs: object) -> ElsevierDownload:
+            return ElsevierDownload(False, "api_configuration_error")
+
+    monkeypatch.setattr(cli, "GlobalConfigStore", FakeStore)
+    monkeypatch.setattr(cli, "ElsevierApiClient", FakeElsevier)
+
+    exit_code = cli.main(["elsevier-setup", "--validate"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 2
+    assert "Article Retrieval API" in output
