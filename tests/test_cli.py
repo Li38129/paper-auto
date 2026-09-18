@@ -352,7 +352,9 @@ def test_auth_command_initializes_persistent_session(
     assert calls["authorize"] == ("acs", "10.1021/example", 10.0)
 
 
-def test_auth_command_accepts_elsevier_publisher(
+@pytest.mark.parametrize("publisher", ["elsevier", "rsc"])
+def test_auth_command_accepts_supported_publisher(
+    publisher: str,
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[str] = []
@@ -375,10 +377,10 @@ def test_auth_command_accepts_elsevier_publisher(
 
     monkeypatch.setattr(cli, "BrowserAuthorizer", FakeAuthorizer)
 
-    exit_code = cli.main(["auth", "--publisher", "elsevier"])
+    exit_code = cli.main(["auth", "--publisher", publisher])
 
     assert exit_code == 0
-    assert calls == ["elsevier"]
+    assert calls == [publisher]
 
 
 def test_elsevier_setup_uses_hidden_input_and_masks_secret(

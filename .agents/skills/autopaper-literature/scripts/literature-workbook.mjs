@@ -277,9 +277,9 @@ function upsertRecords(rows, payload, workbookPath, folderRoot) {
   for (const record of payload.records) {
     let indexes = updateRowMap(rows);
     let rowIndex = record.doi ? indexes.byDoi.get(record.doi) : undefined;
-    if (rowIndex === undefined) {
+    if (rowIndex === undefined && !record.doi) {
       const titleIndex = indexes.byTitle.get(normalizeTitle(record.title));
-      if (titleIndex === null && !record.doi) {
+      if (titleIndex === null) {
         throw new Error(`缺少 DOI 且题名无法唯一匹配：${record.title}`);
       }
       rowIndex = typeof titleIndex === "number" ? titleIndex : undefined;

@@ -76,7 +76,7 @@
 - 普通失败：保留任务目录并报告，不循环重试。
 - `challenge_required` 或 `authentication_required`：前台保持当前页面等待；后台进入 `waiting_for_user`，人工授权后只恢复一次。
 
-ACS/Elsevier 授权命令：
+ACS、Elsevier 或 RSC 授权命令：
 
 ```powershell
 & '<项目根目录>\scripts\doi-harvester.ps1' auth `
@@ -86,7 +86,7 @@ ACS/Elsevier 授权命令：
   --auth-timeout 600
 ```
 
-Elsevier 将 `--publisher acs` 替换为 `--publisher elsevier`。优先验证并使用 Elsevier API；只有 API 未覆盖或失败时才启用浏览器授权。`--cdp` 浏览器必须保持打开，后续下载复用同一进程、工作标签页和持久化配置。
+Elsevier 或 RSC 将 `--publisher acs` 分别替换为 `--publisher elsevier` 或 `--publisher rsc`。优先验证并使用 Elsevier API；只有 API 未覆盖或失败时才启用浏览器授权。`--cdp` 浏览器必须保持打开，后续下载复用同一进程、工作标签页和持久化配置。
 
 Elsevier 浏览器授权示例：
 

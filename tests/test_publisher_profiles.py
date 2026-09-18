@@ -31,3 +31,12 @@ def test_infer_elsevier_from_doi_publisher_or_domain() -> None:
         ).key
         == "elsevier"
     )
+
+
+def test_rsc_profile_is_verified_for_browser_downloads() -> None:
+    profile = infer_publisher_profile("10.1039/c9ta10964a")
+
+    assert profile is not None
+    assert profile.key == "rsc"
+    assert profile.support_level == "verified_browser"
+    assert profile.last_verified == "2026-09-18"

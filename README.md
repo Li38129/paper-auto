@@ -155,7 +155,7 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 `folder_path`。交换文件放在 `temp\doi-harvester\jobs`，不要放入论文数据目录。
 默认只下载期刊正文；只有显式传入 `--supplements` 时才会下载补充材料。
 
-ACS 或 Elsevier 等需要已有订阅会话的出版社：
+ACS、Elsevier 或 RSC 等需要已有订阅会话的出版社：
 
 ```powershell
 .\scripts\doi-harvester.ps1 auth `
@@ -164,7 +164,8 @@ ACS 或 Elsevier 等需要已有订阅会话的出版社：
   --auth-timeout 600
 ```
 
-Elsevier 可把 `--publisher acs` 替换为 `--publisher elsevier`。前台可见下载遇到
+Elsevier 或 RSC 可把 `--publisher acs` 分别替换为 `--publisher elsevier` 或
+`--publisher rsc`。前台可见下载遇到
 `challenge_required` 或 `authentication_required` 时默认暂停最多 600 秒，不再切换到下一篇；
 `--challenge-policy skip` 可恢复原来的跳过行为，`fail-fast` 会停止后续 DOI。无头模式和
 `--detach` 后台任务默认不等待，后台任务会停在 `waiting_for_user`，完成授权后用

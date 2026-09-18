@@ -136,6 +136,8 @@ _PROFILES = (
         prefixes=("10.1039/",),
         domains=("pubs.rsc.org",),
         browser="https://pubs.rsc.org/",
+        support="verified_browser",
+        verified="2026-09-18",
     ),
     _profile(
         "springer",

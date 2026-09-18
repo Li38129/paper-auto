@@ -312,6 +312,15 @@ def test_wait_for_authorization_requires_stable_ready_state() -> None:
     assert page.wait_calls == 2
 
 
+def test_wait_for_authorization_returns_subscription_without_waiting() -> None:
+    page = SignalPage(body="Available to Purchase Pay-Per-View")
+
+    status = wait_for_authorization(page, timeout_seconds=600, poll_ms=1)
+
+    assert status == "subscription_required"
+    assert page.wait_calls == 0
+
+
 def test_profile_lock_prevents_concurrent_profile_use(tmp_path: Path) -> None:
     profile_dir = tmp_path / "profile"
 
@@ -370,6 +379,10 @@ def test_authorizer_waits_for_ready_and_writes_safe_state(
     assert '"status": "ready"' in state
     assert "cookie" not in state.lower()
     assert not (profile_dir / ".doi-harvester.lock").exists()
+
+
+def test_authorizer_has_rsc_probe_doi() -> None:
+    assert BrowserAuthorizer.publisher_probe_dois["rsc"].startswith("10.1039/")
 
 
 def test_cdp_authorizer_keeps_external_browser_endpoint(

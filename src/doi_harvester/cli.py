@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     auth = subparsers.add_parser("auth", help="在专用浏览器配置中初始化出版社授权会话。")
     auth.add_argument(
         "--publisher",
-        choices=["acs", "elsevier"],
+        choices=["acs", "elsevier", "rsc"],
         required=True,
         help="要初始化的出版社。",
     )

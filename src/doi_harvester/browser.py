@@ -188,6 +188,8 @@ def wait_for_authorization(
                 return "ready"
         else:
             ready_count = 0
+        if status == "subscription_required":
+            return status
 
         if time.monotonic() >= deadline:
             return last_status
@@ -290,6 +292,7 @@ class BrowserAuthorizer:
     publisher_probe_dois = {
         "acs": "10.1021/acs.chemmater.9b01639",
         "elsevier": "10.1016/j.watres.2024.121507",
+        "rsc": "10.1039/c9ta10964a",
     }
 
     def __init__(
@@ -465,6 +468,17 @@ class BrowserAuthorizer:
                         wait_until="domcontentloaded",
                         timeout=self.navigation_timeout_ms,
                     )
+                # 先保存可复用端点；即使授权等待被中止，后续任务仍可连接同一浏览器。
+                self._write_state(
+                    AuthorizationResult(
+                        success=False,
+                        status="authorization_pending",
+                        final_url=page.url,
+                        profile_dir=self.profile_dir,
+                        cdp_endpoint=endpoint,
+                        browser_pid=process.pid,
+                    )
+                )
                 LOGGER.warning(
                     "普通 Chrome 已保持打开；请完成站点验证和机构登录，程序会自动检测结果。"
                 )
