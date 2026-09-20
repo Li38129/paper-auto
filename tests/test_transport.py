@@ -39,6 +39,18 @@ class FakeSession:
         return self.response
 
 
+class SequenceSession:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.headers: dict[str, str] = {}
+        self.calls = 0
+
+    def get(self, *_args: Any, **_kwargs: Any) -> FakeResponse:
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
 def test_http_transport_saves_valid_pdf_atomically(tmp_path: Path) -> None:
     body = b"%PDF-1.7\n" + (b"valid-payload" * 200)
     destination = tmp_path / "article.pdf"
@@ -70,3 +82,26 @@ def test_http_transport_rejects_html_disguised_as_pdf(tmp_path: Path) -> None:
     assert outcome.reason == "not_pdf"
     assert not destination.exists()
     assert not destination.with_suffix(".pdf.part").exists()
+
+
+def test_http_transport_honors_retry_after_for_rate_limit(tmp_path: Path) -> None:
+    limited = FakeResponse(b"", status_code=429, content_type="text/html")
+    limited.headers["Retry-After"] = "2"
+    body = b"%PDF-1.7\n" + (b"valid-payload" * 200)
+    session = SequenceSession([limited, FakeResponse(body)])
+    waits: list[float] = []
+    transport = HttpPdfTransport(
+        session=session,
+        minimum_bytes=100,
+        sleeper=waits.append,
+    )
+
+    outcome = transport.download(
+        url="https://example.test/paper.pdf",
+        destination=tmp_path / "article.pdf",
+        referer="https://doi.org/10.1000/example",
+    )
+
+    assert outcome.success is True
+    assert session.calls == 2
+    assert waits == [2.0]

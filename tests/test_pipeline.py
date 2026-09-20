@@ -202,6 +202,21 @@ def test_pipeline_classifies_elsevier_api_configuration_error(tmp_path: Path) ->
     assert "Article Retrieval" in result.next_action.message
 
 
+def test_pipeline_uses_detected_publisher_in_auth_command(tmp_path: Path) -> None:
+    result = DownloadResult(
+        doi="10.1039/d6eb00090h",
+        success=False,
+        status="challenge_required",
+        article_dir=tmp_path,
+        publisher="Royal Society of Chemistry (RSC)",
+    )
+
+    Harvester._classify_result(result)
+
+    assert result.next_action is not None
+    assert result.next_action.command == "doi-harvester auth --publisher rsc --cdp"
+
+
 def test_pipeline_uses_valid_cache(tmp_path: Path) -> None:
     article_dir = tmp_path / "10.1000_example"
     article_dir.mkdir()

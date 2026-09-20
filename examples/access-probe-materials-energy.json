@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "materials-energy-major-publishers",
+  "selection_rule": "每家出版社选择三种材料与能源期刊；优先使用已有任务 DOI",
+  "records": [
+    {"publisher": "rsc", "journal": "Energy & Environmental Science", "doi": "10.1039/d5ee07777j", "source": "existing_task"},
+    {"publisher": "rsc", "journal": "Physical Chemistry Chemical Physics", "doi": "10.1039/d6cp00694a", "source": "existing_task"},
+    {"publisher": "rsc", "journal": "Dalton Transactions", "doi": "10.1039/d5dt02597d", "source": "existing_task"},
+    {"publisher": "acs", "journal": "ACS Applied Materials & Interfaces", "doi": "10.1021/acsami.3c02827", "source": "existing_task"},
+    {"publisher": "acs", "journal": "Chemistry of Materials", "doi": "10.1021/acs.chemmater.4c03086", "source": "existing_task"},
+    {"publisher": "acs", "journal": "ACS Applied Energy Materials", "doi": "10.1021/acsaem.0c02033", "source": "existing_task"},
+    {"publisher": "elsevier", "journal": "Chemical Engineering Journal", "doi": "10.1016/j.cej.2024.154426", "source": "existing_task"},
+    {"publisher": "elsevier", "journal": "Energy Storage Materials", "doi": "10.1016/j.ensm.2025.104193", "source": "existing_task"},
+    {"publisher": "elsevier", "journal": "Solid State Ionics", "doi": "10.1016/j.ssi.2022.116106", "source": "existing_task"},
+    {"publisher": "wiley", "journal": "Batteries & Supercaps", "doi": "10.1002/batt.202500188", "source": "existing_task"},
+    {"publisher": "wiley", "journal": "Advanced Materials Interfaces", "doi": "10.1002/admi.202301067", "source": "existing_task"},
+    {"publisher": "wiley", "journal": "Advanced Science", "doi": "10.1002/advs.202303308", "source": "existing_task"},
+    {"publisher": "springer", "journal": "Rare Metals", "doi": "10.1007/s12598-022-02086-y", "source": "existing_task"},
+    {"publisher": "springer", "journal": "Journal of Electroceramics", "doi": "10.1007/s10832-017-0084-z", "source": "existing_task"},
+    {"publisher": "springer-nature", "journal": "Nature Energy", "doi": "10.1038/s41560-023-01208-9", "source": "crossref_search"}
+  ]
+}

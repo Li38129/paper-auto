@@ -377,7 +377,10 @@ def test_authorizer_waits_for_ready_and_writes_safe_state(
     assert result.status == "ready"
     state = (profile_dir / "auth-state.json").read_text(encoding="utf-8")
     assert '"status": "ready"' in state
-    assert "cookie" not in state.lower()
+    assert '"cookie_metadata"' in state
+    assert '"value"' not in state.lower()
+    assert '"challenge_status": "clear"' in state
+    assert '"institution_status": "active"' in state
     assert not (profile_dir / ".doi-harvester.lock").exists()
 
 

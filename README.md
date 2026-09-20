@@ -11,6 +11,8 @@
 - Elsevier 使用 `view=FULL → MAIN object EID → PDF`，凭据由当前 Windows 用户的 DPAPI 加密；
 - 内置 21 家出版社 Profile，并明确区分 API、HTTP、浏览器已验证和仅配置状态；
 - SQLite 任务支持后台执行、心跳、stalled 检测、恢复、取消和阶段日志；
+- 后台任务保存限速、浏览器和工作簿参数，每 100 条以内建立检查点并自动回写 Excel；
+- 本机机构访问策略支持按 ISSN、期刊名和年份跳过付费入口，同时保留 OA 获取；
 - 可选 MCP 提供 `search`、`download`、`job_status`、`update_excel` 四个工具；
 - 支持 Springer 与 ACS 的稳定正文 URL 规则；
 - 对 HTTP 200 的 HTML 登录页、验证码页等伪 PDF 做魔数与最小尺寸校验；
@@ -104,14 +106,36 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
   --papers-file "$PWD\temp\doi-harvester\jobs\<任务ID>\papers.json" `
   --output-dir "C:\papers" `
   --browser-fallback `
+  --delay 1.5 `
+  --workbook "C:\papers\文献检索汇总.xlsx" `
+  --node-path "C:\path\to\node.exe" `
+  --node-modules "C:\path\to\node_modules" `
   --detach
 
 .\scripts\doi-harvester.ps1 jobs list
 .\scripts\doi-harvester.ps1 jobs status <任务ID>
+.\scripts\doi-harvester.ps1 jobs status <任务ID> --compact
 .\scripts\doi-harvester.ps1 jobs tail <任务ID>
 .\scripts\doi-harvester.ps1 jobs resume <任务ID>
 .\scripts\doi-harvester.ps1 jobs cancel <任务ID>
 ```
+
+`--compact` 只返回任务状态、计数、最近进展、Excel 回写状态和待处理事件，适合每 30 分钟低频检查。后台任务遇验证会停止在当前 DOI，后续论文保持待处理；`jobs resume` 对同一任务只允许一次。
+
+本机机构访问策略：
+
+```powershell
+.\scripts\doi-harvester.ps1 access list
+.\scripts\doi-harvester.ps1 access set `
+  --journal "Nature Energy" `
+  --issn 2058-7546 `
+  --source user_confirmed
+.\scripts\doi-harvester.ps1 access probe `
+  --doi 10.1000/example `
+  --browser-fallback
+```
+
+访问顺序为有效缓存、可靠 OA、访问策略、出版社付费入口。规则保存在 `%LOCALAPPDATA%\AutoPaper\access-policies.json`，可用 `AUTOPAPER_ACCESS_ENVIRONMENT` 区分校园网或学校 VPN。自动探测规则应设置过期时间；单篇失败不会自动变成整刊规则。
 
 运行诊断；默认不访问出版社，只有 `--network` 才执行真实 Elsevier 探针：
 

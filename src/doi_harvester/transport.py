@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -41,10 +42,14 @@ class HttpPdfTransport:
         session: SupportsGet | None = None,
         timeout_seconds: float = 120.0,
         minimum_bytes: int = 1024,
+        max_rate_limit_retries: int = 2,
+        sleeper: Any = time.sleep,
     ) -> None:
         self.session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
         self.minimum_bytes = minimum_bytes
+        self.max_rate_limit_retries = max(max_rate_limit_retries, 0)
+        self.sleeper = sleeper
         self.session.headers.update(
             {
                 "User-Agent": (
@@ -65,59 +70,31 @@ class HttpPdfTransport:
         }
 
         try:
-            with self.session.get(
-                url,
-                headers=headers,
-                timeout=self.timeout_seconds,
-                stream=True,
-                allow_redirects=True,
-            ) as response:
-                status_code = int(response.status_code)
-                content_type = str(response.headers.get("Content-Type", ""))
-                final_url = str(getattr(response, "url", url))
-                if status_code != 200:
-                    return Attempt(
-                        source="http",
-                        url=url,
-                        success=False,
-                        reason=f"http_{status_code}",
-                        status_code=status_code,
-                        content_type=content_type,
-                        final_url=final_url,
-                    )
-
-                bytes_written = 0
-                with temporary.open("wb") as handle:
-                    for chunk in response.iter_content(chunk_size=64 * 1024):
-                        if not chunk:
-                            continue
-                        handle.write(chunk)
-                        bytes_written += len(chunk)
-
-                if not is_valid_pdf(temporary, minimum_bytes=self.minimum_bytes):
-                    temporary.unlink(missing_ok=True)
-                    return Attempt(
-                        source="http",
-                        url=url,
-                        success=False,
-                        reason="not_pdf",
-                        status_code=status_code,
-                        content_type=content_type,
-                        final_url=final_url,
-                        bytes_written=bytes_written,
-                    )
-
-                temporary.replace(destination)
-                return Attempt(
-                    source="http",
-                    url=url,
-                    success=True,
-                    reason="downloaded",
-                    status_code=status_code,
-                    content_type=content_type,
-                    final_url=final_url,
-                    bytes_written=bytes_written,
+            for retry_index in range(self.max_rate_limit_retries + 1):
+                response = self.session.get(
+                    url,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                    stream=True,
+                    allow_redirects=True,
                 )
+                with response:
+                    status_code = int(response.status_code)
+                    if status_code == 429 and retry_index < self.max_rate_limit_retries:
+                        raw_retry_after = str(response.headers.get("Retry-After", "")).strip()
+                        try:
+                            retry_after = float(raw_retry_after)
+                        except ValueError:
+                            retry_after = float(2 ** retry_index)
+                        self.sleeper(min(max(retry_after, 0.0), 60.0))
+                        continue
+                    return self._save_response(
+                        response=response,
+                        url=url,
+                        destination=destination,
+                        temporary=temporary,
+                    )
+            return Attempt(source="http", url=url, success=False, reason="rate_limited")
         except requests.RequestException as exc:
             temporary.unlink(missing_ok=True)
             LOGGER.info("下载 %s 失败：%s", url, exc)
@@ -125,3 +102,59 @@ class HttpPdfTransport:
         except OSError as exc:
             temporary.unlink(missing_ok=True)
             return Attempt(source="http", url=url, success=False, reason=f"io_error:{exc}")
+
+    def _save_response(
+        self,
+        *,
+        response: Any,
+        url: str,
+        destination: Path,
+        temporary: Path,
+    ) -> Attempt:
+        """校验一次 HTTP 响应并原子保存 PDF。"""
+        status_code = int(response.status_code)
+        content_type = str(response.headers.get("Content-Type", ""))
+        final_url = str(getattr(response, "url", url))
+        if status_code != 200:
+            return Attempt(
+                source="http",
+                url=url,
+                success=False,
+                reason=f"http_{status_code}",
+                status_code=status_code,
+                content_type=content_type,
+                final_url=final_url,
+            )
+
+        bytes_written = 0
+        with temporary.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                bytes_written += len(chunk)
+
+        if not is_valid_pdf(temporary, minimum_bytes=self.minimum_bytes):
+            temporary.unlink(missing_ok=True)
+            return Attempt(
+                source="http",
+                url=url,
+                success=False,
+                reason="not_pdf",
+                status_code=status_code,
+                content_type=content_type,
+                final_url=final_url,
+                bytes_written=bytes_written,
+            )
+
+        temporary.replace(destination)
+        return Attempt(
+            source="http",
+            url=url,
+            success=True,
+            reason="downloaded",
+            status_code=status_code,
+            content_type=content_type,
+            final_url=final_url,
+            bytes_written=bytes_written,
+        )

@@ -23,6 +23,9 @@ class ArticleMetadata:
     doi: str
     title: str = ""
     publisher: str = ""
+    journal: str = ""
+    issns: tuple[str, ...] = ()
+    year: int | None = None
     landing_url: str = ""
     candidates: list[DownloadCandidate] = field(default_factory=list)
 
@@ -77,6 +80,9 @@ class DownloadResult:
     article_dir: Path
     title: str = ""
     publisher: str = ""
+    journal: str = ""
+    issns: tuple[str, ...] = ()
+    year: int | None = None
     pdf_path: Path | None = None
     source: str = ""
     attempts: list[Attempt] = field(default_factory=list)

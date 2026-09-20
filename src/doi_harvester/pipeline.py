@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .access_policy import AccessPolicyStore
 from .config import ConfigError, ElsevierCredentials, load_elsevier_credentials
 from .doi import doi_slug, normalize_doi
 from .elsevier import ElsevierApiClient
@@ -38,6 +39,8 @@ class Harvester:
         download_supplements: bool = False,
         elsevier: ElsevierApiClient | None = None,
         elsevier_credentials: ElsevierCredentials | None = None,
+        access_store: AccessPolicyStore | None = None,
+        ignore_access_policy: bool = False,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.browser_fallback = browser_fallback
@@ -48,6 +51,8 @@ class Harvester:
         self.download_supplements = download_supplements
         self.elsevier = elsevier or ElsevierApiClient()
         self.elsevier_credentials = elsevier_credentials
+        self.access_store = access_store or AccessPolicyStore()
+        self.ignore_access_policy = ignore_access_policy
 
     def download(
         self,
@@ -86,6 +91,9 @@ class Harvester:
             article_dir=article_dir,
             title=metadata.title,
             publisher=metadata.publisher,
+            journal=metadata.journal,
+            issns=metadata.issns,
+            year=metadata.year,
         )
 
         referer = metadata.landing_url or f"https://doi.org/{doi}"
@@ -96,6 +104,26 @@ class Harvester:
             referer=referer,
             stage="open_access",
         )
+
+        access_rule = None if self.ignore_access_policy else self.access_store.match(metadata)
+        if not result.success and access_rule is not None:
+            result.status = "policy_skipped"
+            result.reason = "access_policy_skip_paid"
+            result.outcome = "blocked"
+            result.quality = "metadata"
+            result.attempts.append(
+                Attempt(
+                    source="access_policy",
+                    url=referer,
+                    success=False,
+                    reason="access_policy_skip_paid",
+                    stage="access_policy",
+                    provider=access_rule.journal,
+                    route=access_rule.policy,
+                )
+            )
+            self._add_supplements(result)
+            return result
 
         profile = infer_publisher_profile(
             doi,
@@ -247,11 +275,17 @@ class Harvester:
                 command=command,
             )
         elif reason in {"challenge_required", "authentication_required"}:
+            profile = infer_publisher_profile(result.doi, publisher=result.publisher)
+            publisher_key = (
+                profile.key
+                if profile and profile.key in {"acs", "elsevier", "rsc"}
+                else "acs"
+            )
             result.outcome = "auth_required"
             result.next_action = NextAction(
                 kind="authenticate",
                 message="在可见浏览器中完成站点验证或机构登录后重试。",
-                command="doi-harvester auth --publisher acs --cdp",
+                command=f"doi-harvester auth --publisher {publisher_key} --cdp",
             )
         elif reason in {"subscription_required", "not_entitled"}:
             result.outcome = "subscription_required"

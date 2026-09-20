@@ -37,7 +37,6 @@ for ($batchStart = $Start; $batchStart -le $End; $batchStart += $BatchSize) {
     $batchName = "20260918_rsc_{0:D4}-{1:D4}" -f $batchStart, $batchEnd
     $batchRoot = Join-Path $jobsRoot $batchName
     $papers = Join-Path $batchRoot "papers.json"
-    $skippedReport = Join-Path $batchRoot "subscription-skipped-report.json"
     $downloadReport = Join-Path $batchRoot "batch-report.json"
     New-Item -ItemType Directory -Force -Path $batchRoot | Out-Null
 
@@ -48,19 +47,9 @@ for ($batchStart = $Start; $batchStart -le $End; $batchStart += $BatchSize) {
         --records $records `
         --start $batchStart `
         --end $batchEnd `
-        --exclude-journal "JOURNAL OF MATERIALS CHEMISTRY A" `
-        --skipped-report $skippedReport `
         --output $papers
     if ($LASTEXITCODE -ne 0) {
         throw "生成批次 $batchStart-$batchEnd 下载清单失败。"
-    }
-
-    & $NodePath $workbookScript `
-        --node-modules $NodeModules `
-        --workbook $workbook `
-        --report $skippedReport
-    if ($LASTEXITCODE -ne 0) {
-        throw "批次 $batchStart-$batchEnd 的跳过记录写回 Excel 失败。"
     }
 
     Write-Host "[批次下载] $batchStart-$batchEnd"

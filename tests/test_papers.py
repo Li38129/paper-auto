@@ -19,6 +19,9 @@ def test_load_paper_jobs_validates_and_normalizes(tmp_path: Path) -> None:
                         "doi": "https://doi.org/10.1000/ABC",
                         "title": "测试论文",
                         "folder_path": str(folder),
+                        "journal": "Example Journal",
+                        "issn": "1234-5678",
+                        "year": 2025,
                     }
                 ],
             },
@@ -33,6 +36,9 @@ def test_load_paper_jobs_validates_and_normalizes(tmp_path: Path) -> None:
     assert jobs[0].rank == 81
     assert jobs[0].doi == "10.1000/abc"
     assert jobs[0].folder_path == folder
+    assert jobs[0].journal == "Example Journal"
+    assert jobs[0].issn == "1234-5678"
+    assert jobs[0].year == 2025
 
 
 def test_load_paper_jobs_rejects_duplicate_doi(tmp_path: Path) -> None:

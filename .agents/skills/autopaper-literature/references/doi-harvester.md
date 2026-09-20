@@ -64,7 +64,7 @@
   --delay 1
 ```
 
-前台可见下载遇到验证页时保持当前工作标签并等待用户，验证完成前不得切换下一篇。任务较多时增加 `--detach`，记录返回的 `job_id`，再用 `jobs status <job_id>` 监控直至终态。后台任务遇验证时进入 `waiting_for_user` 并保留后续条目；完成授权后运行一次 `jobs resume <job_id>`。任务变为 `stalled` 时也只恢复一次；不要重建编号目录或重新编号。
+前台可见下载遇到验证页时保持当前工作标签并等待用户，验证完成前不得切换下一篇。任务较多时增加 `--detach`，并同时传入 `--workbook`、`--node-path`、`--node-modules`，由后台任务每批自动回写 Excel。记录返回的 `job_id` 后结束当前模型轮次；如需自动跟进，只用 `jobs status <job_id> --compact` 每 30 分钟低频检查。正常运行时不重复读取日志或发送进度。后台任务遇验证时进入 `waiting_for_user` 并保留后续条目；完成授权后运行一次 `jobs resume <job_id>`。任务变为 `stalled` 时也只恢复一次；不要重建编号目录或重新编号。
 
 如果 AutoPaper MCP 已注册，可用 `download` 创建相同任务，并用 `job_status` 等待终态。`papers_file`、`output_dir` 和可选 `report_dir` 必须是绝对路径；`report_dir` 只能位于 `<项目根目录>\temp\doi-harvester\jobs`。
 
@@ -73,6 +73,7 @@
 ## 状态判断与一次重试
 
 - `subscription_required`：机构没有正文权限，作为最终失败，不重试。
+- `policy_skipped`：已先尝试 OA，随后按本机期刊权限规则跳过付费入口。
 - 普通失败：保留任务目录并报告，不循环重试。
 - `challenge_required` 或 `authentication_required`：前台保持当前页面等待；后台进入 `waiting_for_user`，人工授权后只恢复一次。
 
@@ -99,6 +100,8 @@ Elsevier 浏览器授权示例：
 ```
 
 可见浏览器打开后，由用户本人完成安全验证或学校 SSO。不得代填凭据、破解验证或绕过付费墙。授权成功后在同一任务目录创建只包含授权失败项的 `retry-papers.json`，使用与首次下载相同的参数再运行一次，并把重试报告回写 Excel。仍失败即停止。
+
+使用 `access list/set/remove/probe` 维护本机机构访问规则。用户确认的未订阅期刊可以长期保存；自动探测默认 30 天过期。期刊规则只跳过付费入口，必须保留可靠 OA 尝试。单篇购买提示、403、验证码或技术失败不得自动升级为整刊规则。
 
 ## 清理与汇报
 

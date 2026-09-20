@@ -29,6 +29,9 @@ def test_crossref_extracts_metadata_and_deduplicates_pdf_candidates() -> None:
         "message": {
             "title": ["A useful paper"],
             "publisher": "Example Publisher",
+            "container-title": ["Journal of Examples"],
+            "ISSN": ["1234-5678"],
+            "published-online": {"date-parts": [[2025, 1, 2]]},
             "URL": "https://doi.org/10.1007/example",
             "link": [
                 {"URL": "https://example.test/paper.pdf", "content-type": "application/pdf"},
@@ -42,6 +45,9 @@ def test_crossref_extracts_metadata_and_deduplicates_pdf_candidates() -> None:
 
     assert metadata.title == "A useful paper"
     assert metadata.publisher == "Example Publisher"
+    assert metadata.journal == "Journal of Examples"
+    assert metadata.issns == ("1234-5678",)
+    assert metadata.year == 2025
     assert [candidate.url for candidate in metadata.candidates].count(
         "https://example.test/paper.pdf"
     ) == 1

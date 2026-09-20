@@ -189,24 +189,28 @@ async function buildPapers(args) {
     ),
   );
   const recordsPath = args.get("records");
-  let journalByRank = new Map();
+  let metadataByRank = new Map();
   if (recordsPath) {
     if (Array.isArray(recordsPath)) {
       throw new Error("--records 只能指定一次。");
     }
     const recordsPayload = JSON.parse(await fs.readFile(path.resolve(recordsPath), "utf8"));
-    journalByRank = new Map(
-      recordsPayload.records.map((record) => [Number(record.rank), String(record.journal).trim()]),
+    metadataByRank = new Map(
+      recordsPayload.records.map((record) => [Number(record.rank), record]),
     );
   }
   const inRange = payload.records.filter(
     (record) => Number(record.rank) >= start && Number(record.rank) <= end && record.doi,
   );
   const selected = inRange.filter(
-    (record) => !excludedJournals.has((journalByRank.get(Number(record.rank)) ?? "").toLowerCase()),
+    (record) => !excludedJournals.has(
+      String(metadataByRank.get(Number(record.rank))?.journal ?? "").trim().toLowerCase(),
+    ),
   );
   const skipped = inRange.filter(
-    (record) => excludedJournals.has((journalByRank.get(Number(record.rank)) ?? "").toLowerCase()),
+    (record) => excludedJournals.has(
+      String(metadataByRank.get(Number(record.rank))?.journal ?? "").trim().toLowerCase(),
+    ),
   );
   if (!selected.length) {
     throw new Error(`resolved-records.json 中没有 ${start}-${end} 范围的 DOI。`);
@@ -214,12 +218,18 @@ async function buildPapers(args) {
   for (const record of inRange) {
     await fs.mkdir(path.resolve(record.folder_path), { recursive: true });
   }
-  const papers = selected.map((record) => ({
-    rank: Number(record.sequence),
-    doi: normalizeDoi(record.doi),
-    title: String(record.title).trim(),
-    folder_path: path.resolve(record.folder_path),
-  }));
+  const papers = selected.map((record) => {
+    const metadata = metadataByRank.get(Number(record.rank)) ?? {};
+    return {
+      rank: Number(record.sequence),
+      doi: normalizeDoi(record.doi),
+      title: String(record.title).trim(),
+      folder_path: path.resolve(record.folder_path),
+      journal: String(metadata.journal ?? "").trim(),
+      issn: String(metadata.issn ?? "").trim(),
+      year: Number.isInteger(metadata.year) ? metadata.year : null,
+    };
+  });
   await writeJson(required(args, "output"), { schema_version: 1, papers });
   const skippedReport = args.get("skipped-report");
   if (skippedReport) {

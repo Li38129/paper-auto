@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from collections import Counter
@@ -18,6 +19,7 @@ JOB_STATUSES = {
     "queued",
     "running",
     "stalled",
+    "awaiting_excel",
     "waiting_for_user",
     "needs_attention",
     "completed",
@@ -32,6 +34,7 @@ ITEM_STATUSES = {
     "retryable",
     "auth_required",
     "subscription_required",
+    "policy_skipped",
     "failed",
 }
 
@@ -77,6 +80,15 @@ class JobStore:
                     report_dir TEXT,
                     browser_fallback INTEGER NOT NULL DEFAULT 0,
                     profile_dir TEXT NOT NULL DEFAULT '',
+                    options_json TEXT NOT NULL DEFAULT '{}',
+                    workbook_path TEXT NOT NULL DEFAULT '',
+                    node_path TEXT NOT NULL DEFAULT '',
+                    node_modules TEXT NOT NULL DEFAULT '',
+                    excel_status TEXT NOT NULL DEFAULT 'not_requested',
+                    excel_error TEXT NOT NULL DEFAULT '',
+                    batch_size INTEGER NOT NULL DEFAULT 100,
+                    resume_count INTEGER NOT NULL DEFAULT 0,
+                    last_event TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     heartbeat_at TEXT,
@@ -92,6 +104,9 @@ class JobStore:
                     title TEXT NOT NULL DEFAULT '',
                     folder_path TEXT NOT NULL,
                     publisher TEXT NOT NULL DEFAULT '',
+                    journal TEXT NOT NULL DEFAULT '',
+                    issn TEXT NOT NULL DEFAULT '',
+                    year INTEGER,
                     status TEXT NOT NULL,
                     pdf_path TEXT NOT NULL DEFAULT '',
                     source TEXT NOT NULL DEFAULT '',
@@ -128,6 +143,34 @@ class JobStore:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN profile_dir TEXT NOT NULL DEFAULT ''"
                 )
+            job_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            migrations = {
+                "options_json": "TEXT NOT NULL DEFAULT '{}'",
+                "workbook_path": "TEXT NOT NULL DEFAULT ''",
+                "node_path": "TEXT NOT NULL DEFAULT ''",
+                "node_modules": "TEXT NOT NULL DEFAULT ''",
+                "excel_status": "TEXT NOT NULL DEFAULT 'not_requested'",
+                "excel_error": "TEXT NOT NULL DEFAULT ''",
+                "batch_size": "INTEGER NOT NULL DEFAULT 100",
+                "resume_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_event": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in migrations.items():
+                if name not in job_columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+            item_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(job_items)").fetchall()
+            }
+            for name, definition in {
+                "journal": "TEXT NOT NULL DEFAULT ''",
+                "issn": "TEXT NOT NULL DEFAULT ''",
+                "year": "INTEGER",
+            }.items():
+                if name not in item_columns:
+                    connection.execute(f"ALTER TABLE job_items ADD COLUMN {name} {definition}")
             connection.commit()
 
     def create_job(
@@ -138,6 +181,11 @@ class JobStore:
         report_dir: Path | None,
         browser_fallback: bool,
         profile_dir: Path | None = None,
+        options: dict[str, object] | None = None,
+        workbook_path: Path | None = None,
+        node_path: Path | None = None,
+        node_modules: Path | None = None,
+        batch_size: int = 100,
     ) -> str:
         if not records:
             raise ValueError("任务至少需要一条论文记录。")
@@ -148,8 +196,9 @@ class JobStore:
                 """
                 INSERT INTO jobs(
                     id, status, output_dir, report_dir, browser_fallback, profile_dir,
-                    created_at, updated_at, heartbeat_at
-                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+                    options_json, workbook_path, node_path, node_modules, excel_status,
+                    batch_size, created_at, updated_at, heartbeat_at
+                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -161,6 +210,12 @@ class JobStore:
                     ),
                     int(browser_fallback),
                     str(Path(profile_dir).resolve()) if profile_dir else "",
+                    json.dumps(options or {}, ensure_ascii=False),
+                    str(Path(workbook_path).resolve()) if workbook_path else "",
+                    str(Path(node_path).resolve()) if node_path else "",
+                    str(Path(node_modules).resolve()) if node_modules else "",
+                    "pending" if workbook_path else "not_requested",
+                    min(max(int(batch_size), 1), 100),
                     timestamp,
                     timestamp,
                     timestamp,
@@ -174,8 +229,8 @@ class JobStore:
                     """
                     INSERT INTO job_items(
                         job_id, rank, doi, title, folder_path, publisher,
-                        status, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                        journal, issn, year, status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                     """,
                     (
                         job_id,
@@ -184,6 +239,9 @@ class JobStore:
                         str(record.get("title") or ""),
                         str(folder.resolve()),
                         str(record.get("publisher") or ""),
+                        str(record.get("journal") or ""),
+                        str(record.get("issn") or ""),
+                        record.get("year"),
                         timestamp,
                     ),
                 )
@@ -221,6 +279,24 @@ class JobStore:
             connection.execute(
                 "UPDATE jobs SET heartbeat_at = ?, updated_at = ? WHERE id = ?",
                 (timestamp, timestamp, job_id),
+            )
+            connection.commit()
+
+    def set_excel_status(self, job_id: str, status: str, *, error: str = "") -> None:
+        """记录工作簿回写检查点。"""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE jobs SET excel_status = ?, excel_error = ?, updated_at = ? WHERE id = ?",
+                (status, error, _now(), job_id),
+            )
+            connection.commit()
+
+    def set_event(self, job_id: str, event: str) -> None:
+        """保存供低频监控读取的去重事件。"""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE jobs SET last_event = ?, updated_at = ? WHERE id = ?",
+                (event, _now(), job_id),
             )
             connection.commit()
 
@@ -322,6 +398,13 @@ class JobStore:
 
     def prepare_resume(self, job_id: str) -> int:
         with self.connect() as connection:
+            job = connection.execute(
+                "SELECT resume_count FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"任务不存在：{job_id}")
+            if int(job["resume_count"] or 0) >= 1:
+                raise ValueError("该任务已经恢复过一次；请审查报告后新建定向任务。")
             timestamp = _now()
             cursor = connection.execute(
                 """
@@ -334,7 +417,8 @@ class JobStore:
                 """
                 UPDATE jobs
                 SET status = 'queued', updated_at = ?, heartbeat_at = ?,
-                    finished_at = NULL, error = ''
+                    finished_at = NULL, error = '', resume_count = resume_count + 1,
+                    last_event = ''
                 WHERE id = ?
                 """,
                 (timestamp, timestamp, job_id),
@@ -346,7 +430,7 @@ class JobStore:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT rank, doi, title, folder_path, publisher, status
+                SELECT rank, doi, title, folder_path, publisher, journal, issn, year, status
                 FROM job_items WHERE job_id = ? AND status = 'pending'
                 ORDER BY COALESCE(rank, id), id
                 """,
@@ -359,7 +443,12 @@ class JobStore:
         if job["status"] == "canceled":
             return "canceled"
         counts = job["counts"]
-        if counts and set(counts) <= {"downloaded", "cached"}:
+        if counts and set(counts) <= {
+            "downloaded",
+            "cached",
+            "subscription_required",
+            "policy_skipped",
+        }:
             status = "completed"
         elif counts.get("auth_required"):
             status = "waiting_for_user"
@@ -424,8 +513,9 @@ class JobStore:
             claimed["status"] = "running"
             return claimed
 
-    def get_job(self, job_id: str) -> dict[str, Any]:
-        self.mark_stalled_jobs()
+    def get_job(self, job_id: str, *, detect_stalled: bool = True) -> dict[str, Any]:
+        if detect_stalled:
+            self.mark_stalled_jobs()
         with self.connect() as connection:
             job_row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if job_row is None:
@@ -455,6 +545,8 @@ def _item_status(result: DownloadResult) -> str:
     reason = result.reason or result.status
     if reason in {"challenge_required", "authentication_required"}:
         return "auth_required"
+    if reason == "access_policy_skip_paid" or result.status == "policy_skipped":
+        return "policy_skipped"
     if reason in {"subscription_required", "not_entitled"}:
         return "subscription_required"
     if reason in {

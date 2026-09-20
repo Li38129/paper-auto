@@ -15,7 +15,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from .models import Attempt
 from .transport import is_valid_pdf
@@ -121,6 +121,16 @@ class AuthorizationResult:
     reason: str = ""
     cdp_endpoint: str = ""
     browser_pid: int | None = None
+    publisher: str = ""
+    probe_doi: str = ""
+    connection_mode: str = ""
+    browser_restarted: bool = False
+    challenge_status: str = "unknown"
+    institution_status: str = "unknown"
+    article_status: str = "unknown"
+    wait_seconds: float = 0.0
+    state_transitions: tuple[str, ...] = ()
+    cookie_metadata: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -160,6 +170,60 @@ def classify_page(page: object) -> str:
     if _pdf_link_is_visible(page):
         return "ready"
     return "authenticated"
+
+
+def split_access_state(status: str) -> tuple[str, str, str]:
+    """把页面结果拆分为验证、机构登录和单篇访问状态。"""
+    if status == "challenge_required":
+        return "required", "unknown", "unknown"
+    if status == "authentication_required":
+        return "clear", "required", "unknown"
+    if status == "subscription_required":
+        return "clear", "active", "subscription_required"
+    if status == "ready":
+        return "clear", "active", "ready"
+    if status == "authenticated":
+        return "clear", "active", "unknown"
+    return "unknown", "unknown", "unknown"
+
+
+def _safe_page_url(value: str) -> str:
+    """移除可能携带授权令牌的查询参数和片段。"""
+    parsed = urlsplit(value)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _cookie_metadata(context: object) -> tuple[dict[str, object], ...]:
+    """只记录会话相关 Cookie 的名称、域和到期时间。"""
+    try:
+        cookies = context.cookies()
+    except Exception:  # noqa: BLE001
+        return ()
+    markers = ("cf_", "clearance", "auth", "session", "shib", "sso")
+    metadata = []
+    for cookie in cookies:
+        name = str(cookie.get("name") or "")
+        if not any(marker in name.casefold() for marker in markers):
+            continue
+        metadata.append(
+            {
+                "name": name,
+                "domain": str(cookie.get("domain") or ""),
+                "expires": cookie.get("expires"),
+            }
+        )
+    return tuple(metadata)
+
+
+def _prior_ready_probe(profile_dir: Path, publisher: str) -> str:
+    """优先复用同一出版社最近验证成功的 DOI。"""
+    try:
+        payload = json.loads((profile_dir / "auth-state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if payload.get("publisher") != publisher or payload.get("article_status") != "ready":
+        return ""
+    return str(payload.get("probe_doi") or "")
 
 
 def wait_for_authorization(
@@ -232,6 +296,39 @@ def _read_cdp_endpoint(profile_dir: Path) -> str:
     except (OSError, json.JSONDecodeError):
         return ""
     return str(payload.get("cdp_endpoint") or "")
+
+
+def _read_auth_state(profile_dir: Path) -> dict[str, object]:
+    try:
+        payload = json.loads((profile_dir / "auth-state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_session_state(
+    profile_dir: Path,
+    *,
+    context: object,
+    connection_mode: str,
+    browser_restarted: bool,
+    result: Attempt,
+) -> None:
+    """记录下载会话诊断，不保存 Cookie 值或授权查询参数。"""
+    path = profile_dir / "session-state.json"
+    payload = {
+        "schema_version": 1,
+        "checked_at": datetime.now(UTC).isoformat(),
+        "connection_mode": connection_mode,
+        "browser_restarted": browser_restarted,
+        "result": result.reason,
+        "final_url": _safe_page_url(result.final_url),
+        "cookie_metadata": _cookie_metadata(context),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.part")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 def _content_pages(context: object) -> list[object]:
@@ -328,7 +425,11 @@ class BrowserAuthorizer:
                 reason="请安装 browser 可选依赖。",
             )
 
-        probe_doi = doi or self.publisher_probe_dois.get(publisher)
+        probe_doi = (
+            doi
+            or _prior_ready_probe(self.profile_dir, publisher)
+            or self.publisher_probe_dois.get(publisher)
+        )
         if not probe_doi:
             return AuthorizationResult(
                 success=False,
@@ -347,6 +448,8 @@ class BrowserAuthorizer:
                 sync_playwright=sync_playwright,
                 target_url=target_url,
                 timeout_seconds=timeout_seconds,
+                publisher=publisher,
+                probe_doi=probe_doi,
             )
 
         try:
@@ -366,15 +469,30 @@ class BrowserAuthorizer:
                     LOGGER.warning(
                         "请在打开的浏览器中完成站点安全验证和机构登录；程序会自动检测结果。"
                     )
+                    initial_status = classify_page(page)
+                    started = time.monotonic()
                     status = wait_for_authorization(
                         page,
                         timeout_seconds=timeout_seconds,
+                    )
+                    challenge_status, institution_status, article_status = split_access_state(
+                        status
                     )
                     result = AuthorizationResult(
                         success=status == "ready",
                         status=status,
                         final_url=page.url,
                         profile_dir=self.profile_dir,
+                        publisher=publisher,
+                        probe_doi=probe_doi,
+                        connection_mode="persistent_context",
+                        browser_restarted=True,
+                        challenge_status=challenge_status,
+                        institution_status=institution_status,
+                        article_status=article_status,
+                        wait_seconds=round(time.monotonic() - started, 3),
+                        state_transitions=tuple(dict.fromkeys((initial_status, status))),
+                        cookie_metadata=_cookie_metadata(context),
                     )
                     self._write_state(result)
                     return result
@@ -408,7 +526,56 @@ class BrowserAuthorizer:
         sync_playwright: object,
         target_url: str,
         timeout_seconds: float,
+        publisher: str,
+        probe_doi: str,
     ) -> AuthorizationResult:
+        existing_state = _read_auth_state(self.profile_dir)
+        existing_endpoint = str(existing_state.get("cdp_endpoint") or "")
+        if existing_endpoint:
+            try:
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.connect_over_cdp(
+                        existing_endpoint,
+                        timeout=self.navigation_timeout_ms,
+                    )
+                    if browser.contexts:
+                        context = browser.contexts[0]
+                        page = _content_page_or_new(context)
+                        page.set_default_timeout(self.navigation_timeout_ms)
+                        page.goto(
+                            target_url,
+                            wait_until="domcontentloaded",
+                            timeout=self.navigation_timeout_ms,
+                        )
+                        initial_status = classify_page(page)
+                        started = time.monotonic()
+                        status = wait_for_authorization(page, timeout_seconds=timeout_seconds)
+                        challenge_status, institution_status, article_status = split_access_state(
+                            status
+                        )
+                        result = AuthorizationResult(
+                            success=status == "ready",
+                            status=status,
+                            final_url=page.url,
+                            profile_dir=self.profile_dir,
+                            cdp_endpoint=existing_endpoint,
+                            browser_pid=int(existing_state.get("browser_pid") or 0) or None,
+                            publisher=publisher,
+                            probe_doi=probe_doi,
+                            connection_mode="cdp_reused",
+                            browser_restarted=False,
+                            challenge_status=challenge_status,
+                            institution_status=institution_status,
+                            article_status=article_status,
+                            wait_seconds=round(time.monotonic() - started, 3),
+                            state_transitions=tuple(dict.fromkeys((initial_status, status))),
+                            cookie_metadata=_cookie_metadata(context),
+                        )
+                        self._write_state(result)
+                        return result
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.info("现有 CDP 会话不可用，将使用原配置目录重启浏览器：%s", exc)
+
         executable = browser_executable_path(self.channel)
         if executable is None:
             result = AuthorizationResult(
@@ -477,15 +644,22 @@ class BrowserAuthorizer:
                         profile_dir=self.profile_dir,
                         cdp_endpoint=endpoint,
                         browser_pid=process.pid,
+                        publisher=publisher,
+                        probe_doi=probe_doi,
+                        connection_mode="cdp",
+                        browser_restarted=True,
                     )
                 )
                 LOGGER.warning(
                     "普通 Chrome 已保持打开；请完成站点验证和机构登录，程序会自动检测结果。"
                 )
+                initial_status = classify_page(page)
+                started = time.monotonic()
                 status = wait_for_authorization(
                     page,
                     timeout_seconds=timeout_seconds,
                 )
+                challenge_status, institution_status, article_status = split_access_state(status)
                 result = AuthorizationResult(
                     success=status == "ready",
                     status=status,
@@ -493,6 +667,16 @@ class BrowserAuthorizer:
                     profile_dir=self.profile_dir,
                     cdp_endpoint=endpoint,
                     browser_pid=process.pid,
+                    publisher=publisher,
+                    probe_doi=probe_doi,
+                    connection_mode="cdp",
+                    browser_restarted=True,
+                    challenge_status=challenge_status,
+                    institution_status=institution_status,
+                    article_status=article_status,
+                    wait_seconds=round(time.monotonic() - started, 3),
+                    state_transitions=tuple(dict.fromkeys((initial_status, status))),
+                    cookie_metadata=_cookie_metadata(context),
                 )
                 self._write_state(result)
                 return result
@@ -518,6 +702,7 @@ class BrowserAuthorizer:
             "checked_at": datetime.now(UTC).isoformat(),
             **result.to_dict(),
         }
+        payload["final_url"] = _safe_page_url(str(payload.get("final_url") or ""))
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(path)
 
@@ -585,13 +770,22 @@ class BrowserPdfDownloader:
                             timeout=self.timeout_ms,
                         )
                         if browser.contexts:
-                            return self._download_in_context(
-                                context=browser.contexts[0],
+                            context = browser.contexts[0]
+                            result = self._download_in_context(
+                                context=context,
                                 doi=doi,
                                 destination=destination,
                                 temporary=temporary,
                                 candidate_urls=candidate_urls,
                             )
+                            _write_session_state(
+                                self.profile_dir,
+                                context=context,
+                                connection_mode="cdp_reused",
+                                browser_restarted=False,
+                                result=result,
+                            )
+                            return result
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning("现有 CDP 浏览器不可用，改用持久化启动：%s", exc)
 
@@ -606,13 +800,21 @@ class BrowserPdfDownloader:
                         str(self.profile_dir), **launch_options
                     )
                     try:
-                        return self._download_in_context(
+                        result = self._download_in_context(
                             context=context,
                             doi=doi,
                             destination=destination,
                             temporary=temporary,
                             candidate_urls=candidate_urls,
                         )
+                        _write_session_state(
+                            self.profile_dir,
+                            context=context,
+                            connection_mode="persistent_context",
+                            browser_restarted=True,
+                            result=result,
+                        )
+                        return result
                     finally:
                         context.close()
                 finally:

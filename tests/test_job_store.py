@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from doi_harvester.job_store import JobStore
 from doi_harvester.models import Attempt, DownloadResult
 
@@ -119,3 +121,6 @@ def test_resume_resets_auth_required_items(tmp_path: Path) -> None:
     assert count == 1
     assert job["counts"] == {"pending": 2}
     assert job["status"] == "queued"
+
+    with pytest.raises(ValueError, match="恢复过一次"):
+        store.prepare_resume(job_id)

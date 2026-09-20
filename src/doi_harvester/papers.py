@@ -22,6 +22,9 @@ class PaperJob:
     doi: str
     title: str
     folder_path: Path
+    journal: str = ""
+    issn: str = ""
+    year: int | None = None
 
 
 def load_paper_jobs(path: Path) -> list[PaperJob]:
@@ -66,6 +69,23 @@ def load_paper_jobs(path: Path) -> list[PaperJob]:
         folder_path = Path(str(raw_paper.get("folder_path") or ""))
         if not folder_path.is_absolute():
             raise PapersFileError(f"第 {index} 条记录的 folder_path 必须是绝对路径。")
-        jobs.append(PaperJob(rank=rank, doi=doi, title=title, folder_path=folder_path))
+        raw_year = raw_paper.get("year")
+        if raw_year in {None, ""}:
+            year = None
+        elif isinstance(raw_year, int) and not isinstance(raw_year, bool) and raw_year > 0:
+            year = raw_year
+        else:
+            raise PapersFileError(f"第 {index} 条记录的 year 必须是正整数或空值。")
+        jobs.append(
+            PaperJob(
+                rank=rank,
+                doi=doi,
+                title=title,
+                folder_path=folder_path,
+                journal=str(raw_paper.get("journal") or "").strip(),
+                issn=str(raw_paper.get("issn") or "").strip(),
+                year=year,
+            )
+        )
 
     return sorted(jobs, key=lambda item: item.rank)

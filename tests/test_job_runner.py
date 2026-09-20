@@ -85,3 +85,53 @@ def test_run_job_pauses_queue_when_auth_is_required(tmp_path: Path) -> None:
         "auth_required": 1,
         "pending": 1,
     }
+
+
+def test_run_job_checkpoints_excel_and_keeps_processing_skips(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from doi_harvester import job_runner
+
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {
+                "rank": rank,
+                "doi": f"10.1000/{rank}",
+                "title": str(rank),
+                "folder_path": str(tmp_path / str(rank)),
+            }
+            for rank in range(1, 4)
+        ],
+        output_dir=tmp_path,
+        report_dir=tmp_path / "report",
+        browser_fallback=False,
+        workbook_path=tmp_path / "index.xlsx",
+        node_path=tmp_path / "node.exe",
+        node_modules=tmp_path / "node_modules",
+        batch_size=2,
+    )
+    sync_calls: list[Path] = []
+    monkeypatch.setattr(
+        job_runner,
+        "update_workbook",
+        lambda **kwargs: sync_calls.append(kwargs["report_path"]) or {"success": True},
+    )
+
+    class FakeHarvester:
+        def download(self, doi: str, *, article_dir: Path) -> DownloadResult:
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status="policy_skipped",
+                reason="access_policy_skip_paid",
+                article_dir=article_dir,
+            )
+
+    status = run_job(job_id, store=store, harvester=FakeHarvester())
+
+    job = store.get_job(job_id)
+    assert status == "completed"
+    assert job["counts"] == {"policy_skipped": 3}
+    assert job["excel_status"] == "updated"
+    assert len(sync_calls) == 2

@@ -9,9 +9,15 @@ import logging
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .access_policy import (
+    POLICY_SKIP_PAID_KEEP_OA,
+    AccessPolicyStore,
+    AccessRule,
+)
 from .broker import BrokerManager, default_runtime_dir
 from .browser import BrowserAuthorizer, ProfileInUseError
 from .config import (
@@ -89,10 +95,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=600.0,
         help="pause 策略等待用户完成验证或登录的最长秒数。",
     )
-    download.add_argument("--delay", type=float, default=1.0, help="不同 DOI 之间的等待秒数。")
+    download.add_argument("--delay", type=float, default=1.5, help="不同 DOI 之间的等待秒数。")
     download.add_argument("--verbose", action="store_true", help="输出调试日志。")
     download.add_argument(
         "--detach", action="store_true", help="创建可恢复任务并交给后台 Broker 串行处理。"
+    )
+    download.add_argument("--workbook", type=Path, help="后台任务完成批次后回写的 Excel 路径。")
+    download.add_argument("--node-path", type=Path, help="工作簿脚本使用的 Node.js。")
+    download.add_argument("--node-modules", type=Path, help="工作簿脚本依赖目录。")
+    download.add_argument(
+        "--batch-size", type=int, default=100, help="后台任务每次检查点的条目数，最大 100。"
+    )
+    download.add_argument(
+        "--access-environment",
+        default=None,
+        help="本机机构访问策略环境；默认读取 AUTOPAPER_ACCESS_ENVIRONMENT。",
     )
 
     auth = subparsers.add_parser("auth", help="在专用浏览器配置中初始化出版社授权会话。")
@@ -157,6 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     for command in ("status", "tail", "resume", "cancel"):
         item = job_commands.add_parser(command, help=f"{command} 指定任务。")
         item.add_argument("job_id")
+        if command == "status":
+            item.add_argument("--compact", action="store_true", help="仅输出低频监控所需字段。")
         if command == "tail":
             item.add_argument("--limit", type=int, default=30)
 
@@ -165,6 +184,43 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true", help="输出 JSON。")
     doctor.add_argument("--target-dir", type=Path, help="额外检查目标论文目录可写性。")
     doctor.add_argument("--verbose", action="store_true", help="输出调试日志。")
+
+    access = subparsers.add_parser("access", help="维护和探测本机机构期刊访问策略。")
+    access.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
+    access_commands = access.add_subparsers(dest="access_command", required=True)
+    access_list = access_commands.add_parser("list", help="列出当前访问环境规则。")
+    access_list.add_argument("--environment")
+    access_list.add_argument("--include-expired", action="store_true")
+    access_set = access_commands.add_parser("set", help="设置跳过付费入口、保留 OA 的期刊规则。")
+    access_set.add_argument("--environment")
+    access_set.add_argument("--journal", required=True)
+    access_set.add_argument("--issn", action="append", default=[])
+    access_set.add_argument("--alias", action="append", default=[])
+    access_set.add_argument("--year-from", type=int)
+    access_set.add_argument("--year-to", type=int)
+    access_set.add_argument("--source", default="user_confirmed")
+    access_set.add_argument("--evidence", default="")
+    access_set.add_argument("--sample-doi", action="append", default=[])
+    access_set.add_argument("--expires-days", type=int)
+    access_remove = access_commands.add_parser("remove", help="删除期刊访问规则。")
+    access_remove.add_argument("--environment")
+    access_remove.add_argument("--journal", default="")
+    access_remove.add_argument("--issn", default="")
+    access_probe = access_commands.add_parser("probe", help="使用真实 DOI 生成访问证据报告。")
+    access_probe.add_argument("--environment")
+    access_probe.add_argument("--doi", action="append", required=True)
+    access_probe.add_argument("--output-dir", type=Path)
+    access_probe.add_argument("--report-file", type=Path)
+    access_probe.add_argument("--profile-dir", type=Path)
+    access_probe.add_argument("--browser-channel")
+    access_probe.add_argument("--browser-fallback", action="store_true")
+    access_probe.add_argument(
+        "--challenge-policy",
+        choices=["pause", "skip"],
+        default="pause",
+    )
+    access_probe.add_argument("--challenge-timeout", type=float, default=600.0)
+    access_probe.add_argument("--delay", type=float, default=1.5)
 
     worker = subparsers.add_parser("job-worker", help=argparse.SUPPRESS)
     worker.add_argument("--broker-profile", type=Path, required=True)
@@ -210,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv[1:]
     if not arguments or arguments[0] not in {
         "auth",
+        "access",
         "download",
         "elsevier-setup",
         "jobs",
@@ -243,6 +300,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "jobs":
         return _run_jobs(args)
+
+    if args.command == "access":
+        return _run_access(args)
 
     if args.command == "auth":
         try:
@@ -318,14 +378,32 @@ def main(argv: list[str] | None = None) -> int:
                         if paper_job
                         else (args.output_dir.resolve() / doi_slug(doi))
                     ),
+                    "journal": paper_job.journal if paper_job else "",
+                    "issn": paper_job.issn if paper_job else "",
+                    "year": paper_job.year if paper_job else None,
                 }
             )
+        if args.workbook and not args.report_dir:
+            raise SystemExit("后台 Excel 回写要求同时提供 --report-dir。")
+        if bool(args.node_path) != bool(args.node_modules):
+            raise SystemExit("--node-path 与 --node-modules 必须同时提供。")
         job_id = store.create_job(
             records=records,
             output_dir=args.output_dir.resolve(),
             report_dir=args.report_dir.resolve() if args.report_dir else None,
             browser_fallback=args.browser_fallback,
             profile_dir=profile_dir,
+            options={
+                "delay_seconds": args.delay,
+                "email": args.email or "",
+                "headless": args.headless,
+                "browser_channel": args.browser_channel or "",
+                "access_environment": args.access_environment or "default",
+            },
+            workbook_path=args.workbook,
+            node_path=args.node_path,
+            node_modules=args.node_modules,
+            batch_size=args.batch_size,
         )
         pid = BrokerManager(profile_dir=profile_dir, runtime_dir=runtime).ensure_started()
         print(f"任务已排队：{job_id}；Broker PID：{pid}")
@@ -338,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         email=args.email,
         browser_options=browser_options,
         download_supplements=args.supplements,
+        access_store=AccessPolicyStore(environment=args.access_environment),
     )
     serialized: list[dict[str, object]] = []
     for index, (doi, paper_job) in enumerate(tasks):
@@ -491,17 +570,36 @@ def _run_jobs(args: argparse.Namespace) -> int:
             print(f"{job['id']}\t{job['status']}\t{job['created_at']}")
         return 0
     try:
-        job = store.get_job(args.job_id)
+        job = store.get_job(
+            args.job_id,
+            detect_stalled=not (args.jobs_command == "status" and args.compact),
+        )
     except KeyError as exc:
         print(f"[失败] {exc}")
         return 2
     if args.jobs_command == "status":
+        if args.compact:
+            payload = {
+                "job_id": job["id"],
+                "status": job["status"],
+                "counts": job["counts"],
+                "updated_at": job["updated_at"],
+                "heartbeat_at": job["heartbeat_at"],
+                "excel_status": job.get("excel_status", "not_requested"),
+                "excel_error": job.get("excel_error", ""),
+                "event": job.get("last_event", ""),
+            }
+            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            return 0
         payload = {
             "job_id": job["id"],
             "status": job["status"],
             "counts": job["counts"],
             "report_dir": job["report_dir"],
             "error": job["error"],
+            "excel_status": job.get("excel_status", "not_requested"),
+            "excel_error": job.get("excel_error", ""),
+            "event": job.get("last_event", ""),
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
@@ -516,10 +614,144 @@ def _run_jobs(args: argparse.Namespace) -> int:
         print(f"任务已标记取消：{args.job_id}")
         return 0
     if args.jobs_command == "resume":
-        count = store.prepare_resume(args.job_id)
+        try:
+            count = store.prepare_resume(args.job_id)
+        except ValueError as exc:
+            print(f"[失败] {exc}")
+            return 2
         runtime = default_runtime_dir().resolve()
         profile = Path(job["profile_dir"] or runtime / "profiles" / "default")
         pid = BrokerManager(profile_dir=profile, runtime_dir=runtime).ensure_started()
         print(f"任务已恢复：{args.job_id}；待处理 {count} 条；Broker PID：{pid}")
         return 0
+    return 2
+
+
+def _probe_category(result: object) -> str:
+    """把下载结果映射为权限探测类别。"""
+    status = str(getattr(result, "status", ""))
+    source = str(getattr(result, "source", ""))
+    if bool(getattr(result, "success", False)):
+        return "oa_accessible" if source == "openalex" else "full_text_accessible"
+    reason = str(getattr(result, "reason", "") or status)
+    if reason in {"subscription_required", "not_entitled"}:
+        return "article_not_entitled"
+    if reason == "authentication_required":
+        return "authentication_required"
+    if reason == "challenge_required":
+        return "challenge_required"
+    return "technical_failure"
+
+
+def _run_access(args: argparse.Namespace) -> int:
+    """维护访问策略或执行真实 DOI 探测。"""
+    store = AccessPolicyStore(environment=getattr(args, "environment", None))
+    if args.access_command == "list":
+        rules = store.list_rules(include_expired=args.include_expired)
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "environment": store.environment,
+                    "path": str(store.path),
+                    "rules": [
+                        {
+                            "journal": rule.journal,
+                            "issns": rule.issns,
+                            "aliases": rule.aliases,
+                            "year_from": rule.year_from,
+                            "year_to": rule.year_to,
+                            "policy": rule.policy,
+                            "source": rule.source,
+                            "evidence": rule.evidence,
+                            "sample_dois": rule.sample_dois,
+                            "checked_at": rule.checked_at,
+                            "expires_at": rule.expires_at,
+                            "expired": rule.is_expired(),
+                        }
+                        for rule in rules
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if args.access_command == "set":
+        if args.year_from and args.year_to and args.year_from > args.year_to:
+            raise SystemExit("--year-from 不能大于 --year-to。")
+        expires_at = (
+            AccessPolicyStore.automatic_expiry(days=args.expires_days)
+            if args.expires_days is not None
+            else None
+        )
+        rule = AccessRule(
+            journal=args.journal,
+            policy=POLICY_SKIP_PAID_KEEP_OA,
+            issns=args.issn,
+            aliases=args.alias,
+            year_from=args.year_from,
+            year_to=args.year_to,
+            source=args.source,
+            evidence=args.evidence,
+            sample_dois=[normalize_doi(value) for value in args.sample_doi],
+            expires_at=expires_at,
+        )
+        store.save_rule(rule)
+        print(f"已保存访问规则：{rule.journal}；环境：{store.environment}；文件：{store.path}")
+        return 0
+    if args.access_command == "remove":
+        if not args.journal and not args.issn:
+            raise SystemExit("access remove 至少需要 --journal 或 --issn。")
+        removed = store.remove(journal=args.journal, issn=args.issn)
+        print(f"已删除 {removed} 条规则；环境：{store.environment}")
+        return 0 if removed else 2
+    if args.access_command == "probe":
+        runtime = default_runtime_dir().resolve()
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        output_dir = (args.output_dir or runtime / "access-probes" / timestamp).resolve()
+        report_file = (args.report_file or output_dir / "access-probe-report.json").resolve()
+        browser_options: dict[str, object] = {
+            "challenge_policy": args.challenge_policy,
+            "challenge_timeout_seconds": args.challenge_timeout,
+            "profile_dir": args.profile_dir or runtime / "profiles" / "default",
+        }
+        if args.browser_channel:
+            browser_options["channel"] = args.browser_channel
+        harvester = Harvester(
+            output_dir=output_dir,
+            browser_fallback=args.browser_fallback,
+            browser_options=browser_options,
+            ignore_access_policy=True,
+        )
+        results = []
+        dois = [normalize_doi(value) for value in args.doi]
+        for index, doi in enumerate(dict.fromkeys(dois)):
+            result = harvester.download(doi)
+            payload = result.to_dict()
+            payload["probe_category"] = _probe_category(result)
+            results.append(payload)
+            if payload["probe_category"] in {
+                "authentication_required",
+                "challenge_required",
+            }:
+                break
+            if index < len(dois) - 1 and args.delay > 0:
+                time.sleep(args.delay)
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "environment": store.environment,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                    "results": results,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"权限探测完成：{report_file}")
+        return 0 if all(item["success"] for item in results) else 2
     return 2

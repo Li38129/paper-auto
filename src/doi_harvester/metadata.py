@@ -53,6 +53,24 @@ def _deduplicate(candidates: list[DownloadCandidate]) -> list[DownloadCandidate]
     return result
 
 
+def _published_year(message: Mapping[str, Any]) -> int | None:
+    """从 Crossref 常见日期字段提取出版年份。"""
+    for key in ("published-print", "published-online", "published", "issued"):
+        value = message.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        date_parts = value.get("date-parts")
+        if (
+            isinstance(date_parts, list)
+            and date_parts
+            and isinstance(date_parts[0], list)
+            and date_parts[0]
+            and isinstance(date_parts[0][0], int)
+        ):
+            return int(date_parts[0][0])
+    return None
+
+
 class CrossrefMetadataClient:
     """读取 Crossref Works API，并提取正文 PDF 候选。"""
 
@@ -93,6 +111,20 @@ class CrossrefMetadataClient:
         titles = message.get("title") or []
         title = str(titles[0]) if isinstance(titles, list) and titles else ""
         publisher = str(message.get("publisher") or "")
+        container_titles = message.get("container-title") or []
+        journal = (
+            str(container_titles[0])
+            if isinstance(container_titles, list) and container_titles
+            else ""
+        )
+        raw_issns = message.get("ISSN") or []
+        issns = tuple(
+            dict.fromkeys(
+                str(value).strip().upper()
+                for value in raw_issns
+                if str(value).strip()
+            )
+        ) if isinstance(raw_issns, list) else ()
         landing_url = str(message.get("URL") or f"https://doi.org/{doi}")
         candidates: list[DownloadCandidate] = []
 
@@ -113,6 +145,9 @@ class CrossrefMetadataClient:
             doi=doi,
             title=title,
             publisher=publisher,
+            journal=journal,
+            issns=issns,
+            year=_published_year(message),
             landing_url=landing_url,
             candidates=_deduplicate(candidates),
         )
