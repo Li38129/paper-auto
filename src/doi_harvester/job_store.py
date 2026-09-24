@@ -8,6 +8,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,9 @@ class JobStore:
                     pdf_path TEXT NOT NULL DEFAULT '',
                     source TEXT NOT NULL DEFAULT '',
                     failure_reason TEXT NOT NULL DEFAULT '',
+                    supplement_status TEXT NOT NULL DEFAULT 'not_requested',
+                    supplements_json TEXT NOT NULL DEFAULT '[]',
+                    supplement_attempts_json TEXT NOT NULL DEFAULT '[]',
                     updated_at TEXT NOT NULL,
                     UNIQUE(job_id, doi)
                 );
@@ -168,6 +172,9 @@ class JobStore:
                 "journal": "TEXT NOT NULL DEFAULT ''",
                 "issn": "TEXT NOT NULL DEFAULT ''",
                 "year": "INTEGER",
+                "supplement_status": "TEXT NOT NULL DEFAULT 'not_requested'",
+                "supplements_json": "TEXT NOT NULL DEFAULT '[]'",
+                "supplement_attempts_json": "TEXT NOT NULL DEFAULT '[]'",
             }.items():
                 if name not in item_columns:
                     connection.execute(f"ALTER TABLE job_items ADD COLUMN {name} {definition}")
@@ -292,7 +299,7 @@ class JobStore:
             connection.commit()
 
     def set_event(self, job_id: str, event: str) -> None:
-        """保存供低频监控读取的去重事件。"""
+        """保存供任务监督读取的最新事件。"""
         with self.connect() as connection:
             connection.execute(
                 "UPDATE jobs SET last_event = ?, updated_at = ? WHERE id = ?",
@@ -356,7 +363,9 @@ class JobStore:
             connection.execute(
                 """
                 UPDATE job_items
-                SET status = ?, pdf_path = ?, source = ?, failure_reason = ?, updated_at = ?
+                SET status = ?, pdf_path = ?, source = ?, failure_reason = ?,
+                    supplement_status = ?, supplements_json = ?, supplement_attempts_json = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -364,6 +373,11 @@ class JobStore:
                     str(result.pdf_path or ""),
                     result.source,
                     result.reason or ("" if result.success else result.status),
+                    result.supplement_status,
+                    json.dumps([asdict(item) for item in result.supplements], ensure_ascii=False),
+                    json.dumps(
+                        [asdict(item) for item in result.supplement_attempts], ensure_ascii=False
+                    ),
                     timestamp,
                     item_id,
                 ),
@@ -396,23 +410,32 @@ class JobStore:
                 )
             connection.commit()
 
-    def prepare_resume(self, job_id: str) -> int:
+    def prepare_resume(self, job_id: str, *, retry_failed: bool = False) -> int:
         with self.connect() as connection:
-            job = connection.execute(
-                "SELECT resume_count FROM jobs WHERE id = ?", (job_id,)
-            ).fetchone()
+            job = connection.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if job is None:
                 raise KeyError(f"任务不存在：{job_id}")
-            if int(job["resume_count"] or 0) >= 1:
-                raise ValueError("该任务已经恢复过一次；请审查报告后新建定向任务。")
+            if str(job["status"]) in {"queued", "running", "awaiting_excel"}:
+                raise ValueError(f"任务当前为 {job['status']}，不能重复启动。")
             timestamp = _now()
+            statuses = ["retryable", "running", "auth_required"]
+            if retry_failed:
+                statuses.append("failed")
+            placeholders = ",".join("?" for _ in statuses)
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE job_items SET status = 'pending', updated_at = ?
-                WHERE job_id = ? AND status IN ('retryable', 'running', 'auth_required')
+                WHERE job_id = ? AND status IN ({placeholders})
                 """,
-                (timestamp, job_id),
+                (timestamp, job_id, *statuses),
             )
+            if cursor.rowcount == 0:
+                pending_count = connection.execute(
+                    "SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status = 'pending'",
+                    (job_id,),
+                ).fetchone()[0]
+                if not pending_count:
+                    raise ValueError("任务没有可恢复的条目。")
             connection.execute(
                 """
                 UPDATE jobs
@@ -532,6 +555,8 @@ class JobStore:
                     (row["id"],),
                 ).fetchall()
                 item["attempts"] = [dict(attempt) for attempt in attempts]
+                item["supplements"] = json.loads(item["supplements_json"] or "[]")
+                item["supplement_attempts"] = json.loads(item["supplement_attempts_json"] or "[]")
                 items.append(item)
         job = dict(job_row)
         job["items"] = items
@@ -543,6 +568,13 @@ def _item_status(result: DownloadResult) -> str:
     if result.success:
         return "cached" if result.status == "cached" else "downloaded"
     reason = result.reason or result.status
+    if reason.startswith(("cdp_error:", "browser_error:", "browser_display_")) or reason in {
+        "browser_executable_not_found",
+        "browser_not_foreground",
+        "browser_not_visible",
+        "browser_error",
+    }:
+        return "retryable"
     if reason in {"challenge_required", "authentication_required"}:
         return "auth_required"
     if reason == "access_policy_skip_paid" or result.status == "policy_skipped":

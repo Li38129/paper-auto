@@ -30,7 +30,12 @@ function Remove-GeneratedDirectory {
         throw "拒绝清理运行目录之外的路径：$resolvedPath"
     }
 
-    [System.IO.Directory]::Delete($resolvedPath, $true)
+    try {
+        [System.IO.Directory]::Delete($resolvedPath, $true)
+    }
+    catch {
+        Write-Warning "无法清理目录，可能仍被浏览器或系统占用，已跳过：$resolvedPath"
+    }
 }
 
 function Remove-GeneratedFile {
@@ -53,7 +58,12 @@ function Remove-GeneratedFile {
         throw "拒绝清理临时目录之外的文件：$resolvedPath"
     }
 
-    [System.IO.File]::Delete($resolvedPath)
+    try {
+        [System.IO.File]::Delete($resolvedPath)
+    }
+    catch {
+        Write-Warning "无法清理文件，可能仍被浏览器或系统占用，已跳过：$resolvedPath"
+    }
 }
 
 function Test-ProfileActive {

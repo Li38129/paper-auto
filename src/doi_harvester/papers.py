@@ -64,8 +64,6 @@ def load_paper_jobs(path: Path) -> list[PaperJob]:
         seen_dois.add(doi)
 
         title = str(raw_paper.get("title") or "").strip()
-        if not title:
-            raise PapersFileError(f"第 {index} 条记录缺少 title。")
         folder_path = Path(str(raw_paper.get("folder_path") or ""))
         if not folder_path.is_absolute():
             raise PapersFileError(f"第 {index} 条记录的 folder_path 必须是绝对路径。")

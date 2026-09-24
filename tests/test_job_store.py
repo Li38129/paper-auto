@@ -6,7 +6,42 @@ from pathlib import Path
 import pytest
 
 from doi_harvester.job_store import JobStore
-from doi_harvester.models import Attempt, DownloadResult
+from doi_harvester.models import Attempt, DownloadResult, SupplementArtifact
+
+
+def test_supplement_result_survives_job_store_reopen(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=sample_records(tmp_path),
+        output_dir=tmp_path,
+        report_dir=tmp_path / "report",
+        browser_fallback=False,
+        options={"supplements_only": True},
+    )
+    store.record_result(
+        job_id,
+        "10.1000/one",
+        DownloadResult(
+            doi="10.1000/one",
+            success=True,
+            status="downloaded",
+            article_dir=tmp_path / "1 One",
+            supplement_status="downloaded",
+            supplements=[
+                SupplementArtifact(
+                    name="si.csv",
+                    path=str(tmp_path / "1 One" / "supplements" / "si.csv"),
+                    url="https://example.test/si.csv",
+                    content_type="text/csv",
+                    bytes_written=10,
+                    sha256="A" * 64,
+                )
+            ],
+        ),
+    )
+    item = JobStore(tmp_path / "jobs.sqlite3").get_job(job_id)["items"][0]
+    assert item["supplement_status"] == "downloaded"
+    assert item["supplements"][0]["name"] == "si.csv"
 
 
 def sample_records(root: Path) -> list[dict[str, object]]:
@@ -95,6 +130,7 @@ def test_resume_resets_only_retryable_items(tmp_path: Path) -> None:
     )
     store.set_item_status(job_id, "10.1000/one", "downloaded")
     store.set_item_status(job_id, "10.1000/two", "retryable")
+    store.set_job_status(job_id, "needs_attention")
 
     count = store.prepare_resume(job_id)
 
@@ -102,6 +138,29 @@ def test_resume_resets_only_retryable_items(tmp_path: Path) -> None:
     assert count == 1
     assert job["counts"] == {"downloaded": 1, "pending": 1}
     assert job["status"] == "queued"
+
+
+def test_cdp_error_is_retryable(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[sample_records(tmp_path)[0]],
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=True,
+    )
+
+    store.record_result(
+        job_id,
+        "10.1000/one",
+        DownloadResult(
+            doi="10.1000/one",
+            success=False,
+            status="cdp_error:RuntimeError",
+            article_dir=tmp_path / "1 One",
+        ),
+    )
+
+    assert store.get_job(job_id)["counts"] == {"retryable": 1}
 
 
 def test_resume_resets_auth_required_items(tmp_path: Path) -> None:
@@ -122,5 +181,25 @@ def test_resume_resets_auth_required_items(tmp_path: Path) -> None:
     assert job["counts"] == {"pending": 2}
     assert job["status"] == "queued"
 
-    with pytest.raises(ValueError, match="恢复过一次"):
+    with pytest.raises(ValueError, match="不能重复启动"):
         store.prepare_resume(job_id)
+
+    store.set_item_status(job_id, "10.1000/one", "auth_required")
+    store.set_job_status(job_id, "waiting_for_user")
+    assert store.prepare_resume(job_id) == 1
+
+
+def test_resume_can_include_reviewed_failures(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=sample_records(tmp_path),
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=True,
+    )
+    store.set_item_status(job_id, "10.1000/one", "failed")
+    store.set_item_status(job_id, "10.1000/two", "downloaded")
+    store.set_job_status(job_id, "needs_attention")
+
+    assert store.prepare_resume(job_id, retry_failed=True) == 1
+    assert store.get_job(job_id)["counts"] == {"pending": 1, "downloaded": 1}

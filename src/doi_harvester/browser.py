@@ -446,6 +446,7 @@ class BrowserAuthorizer:
         if self.cdp:
             return self._authorize_with_cdp(
                 sync_playwright=sync_playwright,
+                timeout_error_type=PlaywrightTimeoutError,
                 target_url=target_url,
                 timeout_seconds=timeout_seconds,
                 publisher=publisher,
@@ -524,6 +525,7 @@ class BrowserAuthorizer:
         self,
         *,
         sync_playwright: object,
+        timeout_error_type: type[Exception],
         target_url: str,
         timeout_seconds: float,
         publisher: str,
@@ -540,7 +542,8 @@ class BrowserAuthorizer:
                     )
                     if browser.contexts:
                         context = browser.contexts[0]
-                        page = _content_page_or_new(context)
+                        from .visible_browser import work_page
+                        page = work_page(context, self.profile_dir)
                         page.set_default_timeout(self.navigation_timeout_ms)
                         page.goto(
                             target_url,
@@ -573,6 +576,22 @@ class BrowserAuthorizer:
                         )
                         self._write_state(result)
                         return result
+            except timeout_error_type as exc:
+                result = AuthorizationResult(
+                    success=False,
+                    status="browser_timeout",
+                    final_url=target_url,
+                    profile_dir=self.profile_dir,
+                    reason=str(exc),
+                    cdp_endpoint=existing_endpoint,
+                    browser_pid=int(existing_state.get("browser_pid") or 0) or None,
+                    publisher=publisher,
+                    probe_doi=probe_doi,
+                    connection_mode="cdp_reused",
+                    browser_restarted=False,
+                )
+                self._write_state(result)
+                return result
             except Exception as exc:  # noqa: BLE001
                 LOGGER.info("现有 CDP 会话不可用，将使用原配置目录重启浏览器：%s", exc)
 
@@ -627,7 +646,8 @@ class BrowserAuthorizer:
                 if not browser.contexts:
                     raise RuntimeError("普通 Chrome 未提供默认浏览器上下文")
                 context = browser.contexts[0]
-                page = _content_page_or_new(context)
+                from .visible_browser import work_page
+                page = work_page(context, self.profile_dir)
                 page.set_default_timeout(self.navigation_timeout_ms)
                 if page.url in {"", "about:blank", "chrome://newtab/"}:
                     page.goto(
@@ -722,6 +742,7 @@ class BrowserPdfDownloader:
         interactive_wait_seconds: float = 0.0,
         challenge_policy: str = "skip",
         challenge_timeout_seconds: float = 600.0,
+        keep_browser_open: bool = False,
     ) -> None:
         self.profile_dir = profile_dir or self._default_profile_dir()
         self.channel = channel if channel is not None else self._default_channel()
@@ -732,6 +753,7 @@ class BrowserPdfDownloader:
             raise ValueError(f"未知验证页处理策略：{challenge_policy}")
         self.challenge_policy = challenge_policy
         self.challenge_timeout_seconds = max(challenge_timeout_seconds, 0.0)
+        self.keep_browser_open = keep_browser_open
         if self.interactive_wait_seconds > 0:
             self.challenge_policy = "pause"
             self.challenge_timeout_seconds = self.interactive_wait_seconds
@@ -761,6 +783,32 @@ class BrowserPdfDownloader:
         doi_url = f"https://doi.org/{doi}"
 
         try:
+            if (
+                self.keep_browser_open
+                and not self.headless
+                and self.challenge_policy == "pause"
+            ):
+                # 普通 CDP 浏览器由独立进程持有，当前下载结束或等待超时后仍保持页面。
+                bootstrap = BrowserAuthorizer(
+                    profile_dir=self.profile_dir,
+                    channel=self.channel,
+                    navigation_timeout_seconds=max(self.timeout_ms / 1000, 1),
+                    cdp=True,
+                ).authorize(
+                    publisher="download",
+                    doi=doi,
+                    timeout_seconds=0,
+                )
+                if bootstrap.status.startswith(("browser_error:", "cdp_error:")) or (
+                    bootstrap.status == "browser_executable_not_found"
+                ):
+                    return Attempt(
+                        source="browser",
+                        url=doi_url,
+                        success=False,
+                        reason=bootstrap.status,
+                        final_url=bootstrap.final_url,
+                    )
             with sync_playwright() as playwright:
                 cdp_endpoint = _read_cdp_endpoint(self.profile_dir)
                 if cdp_endpoint:
@@ -849,7 +897,8 @@ class BrowserPdfDownloader:
     ) -> Attempt:
         doi_url = f"https://doi.org/{doi}"
         # 复用同一网页标签，避免批量下载时不断抢占前台并积累验证页。
-        page = _content_page_or_new(context)
+        from .visible_browser import work_page
+        page = work_page(context, self.profile_dir)
         page.set_default_timeout(self.timeout_ms)
         page.goto(doi_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
         page.wait_for_timeout(3000)

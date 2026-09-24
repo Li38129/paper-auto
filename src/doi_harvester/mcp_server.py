@@ -40,8 +40,15 @@ def download(
     output_dir: str,
     report_dir: str | None = None,
     browser_fallback: bool = True,
-    detach: bool = True,
+    detach: bool = False,
+    supplements: bool = False,
+    supplements_only: bool = False,
+    browser_display: str = "foreground",
 ) -> dict[str, object]:
+    if supplements and supplements_only:
+        raise ValueError("supplements 与 supplements_only 不能同时开启。")
+    if browser_display not in {"foreground", "off"}:
+        raise ValueError("browser_display 必须为 foreground 或 off。")
     papers_path = _absolute_path(papers_file, "papers_file")
     output_path = _absolute_path(output_dir, "output_dir")
     jobs = load_paper_jobs(papers_path)
@@ -74,6 +81,14 @@ def download(
         report_dir=report_path,
         browser_fallback=browser_fallback,
         profile_dir=profile_dir,
+        options={
+            "challenge_policy": "pause",
+            "challenge_timeout_seconds": 600.0,
+            "keep_browser_open": True,
+            "supplements": supplements,
+            "supplements_only": supplements_only,
+            "browser_display": browser_display,
+        },
     )
     if detach:
         BrokerManager(profile_dir=profile_dir, runtime_dir=runtime).ensure_started()

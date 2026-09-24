@@ -6,11 +6,11 @@
 
 `auth-state.json` 分别记录安全验证、机构登录和当前文章访问状态；`session-state.json` 记录连接方式、浏览器是否重启、脱敏后的页面地址，以及相关 Cookie 的名称、域和到期时间。两个文件都不保存 Cookie 值、密码或带授权参数的 URL。
 
-## 后台任务与模型等待
+## 前台监督与可选后台任务
 
-稳定批次应使用 `download --detach`。后台 Broker 在 SQLite 中保存每条论文的检查点，按最多 100 条回写一次报告和 Excel。模型只需用 `jobs status <job_id> --compact` 低频读取状态；该命令不会修改任务状态，也不会输出逐篇日志。
+批量 `papers.json` 默认使用前台可恢复任务。模型跟随命令输出监督当前 DOI、处理结果和计数，每次等待不超过 60 秒；显式传入 `download --detach` 时才交给后台 Broker。两种模式都在 SQLite 中保存每条论文的检查点，并按最多 100 条回写一次报告和 Excel。
 
-遇到验证或登录时，任务进入 `waiting_for_user` 并停止处理后续 DOI。人工授权后使用 `jobs resume` 恢复一次。Excel 被占用或运行时依赖缺失时，任务保留为 `needs_attention`；恢复时先补写已有报告，再继续下载。
+遇到验证或登录时，普通 Chrome/Edge 与当前标签保持打开，任务进入 `waiting_for_user` 并停止处理后续 DOI。人工授权后使用 `jobs resume` 前台恢复，需要后台运行时增加 `--detach`。每次新的独立验证都可以恢复；正在排队、运行或回写 Excel 的任务会拒绝重复启动。Excel 被占用或运行时依赖缺失时，任务保留为 `needs_attention`；恢复时先补写已有报告，再继续下载。
 
 ## 期刊访问策略
 

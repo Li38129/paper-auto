@@ -87,6 +87,100 @@ def test_run_job_pauses_queue_when_auth_is_required(tmp_path: Path) -> None:
     }
 
 
+def test_run_job_pauses_queue_when_browser_connection_breaks(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {
+                "rank": 1,
+                "doi": "10.1000/one",
+                "title": "One",
+                "folder_path": str(tmp_path / "1 One"),
+            },
+            {
+                "rank": 2,
+                "doi": "10.1000/two",
+                "title": "Two",
+                "folder_path": str(tmp_path / "2 Two"),
+            },
+        ],
+        output_dir=tmp_path,
+        report_dir=tmp_path / "report",
+        browser_fallback=True,
+    )
+    calls: list[str] = []
+
+    class FakeHarvester:
+        def download(self, doi: str, *, article_dir: Path) -> DownloadResult:
+            calls.append(doi)
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status="cdp_error:RuntimeError",
+                article_dir=article_dir,
+            )
+
+    status = run_job(job_id, store=store, harvester=FakeHarvester())
+
+    assert status == "needs_attention"
+    assert calls == ["10.1000/one"]
+    assert store.get_job(job_id)["counts"] == {
+        "retryable": 1,
+        "pending": 1,
+    }
+    assert store.get_job(job_id)["last_event"].startswith("browser_recoverable_error:")
+
+
+def test_run_job_passes_saved_browser_supervision_options(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from doi_harvester import job_runner
+
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    captured: dict[str, object] = {}
+    job_id = store.create_job(
+        records=[
+            {
+                "rank": 1,
+                "doi": "10.1000/example",
+                "title": "Paper",
+                "folder_path": str(tmp_path / "1 Paper"),
+            }
+        ],
+        output_dir=tmp_path,
+        report_dir=tmp_path / "report",
+        browser_fallback=True,
+        profile_dir=tmp_path / "profile",
+        options={
+            "challenge_policy": "pause",
+            "challenge_timeout_seconds": 42,
+            "keep_browser_open": True,
+        },
+    )
+
+    class FakeHarvester:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def download(self, doi: str, *, article_dir: Path) -> DownloadResult:
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status="challenge_required",
+                article_dir=article_dir,
+            )
+
+    monkeypatch.setattr(job_runner, "Harvester", FakeHarvester)
+    assert run_job(job_id, store=store) == "waiting_for_user"
+
+    browser_options = captured["browser_options"]
+    assert isinstance(browser_options, dict)
+    assert browser_options["challenge_policy"] == "pause"
+    assert browser_options["challenge_timeout_seconds"] == 42
+    assert browser_options["keep_browser_open"] is True
+    assert captured["browser_display"] == "foreground"
+
+
 def test_run_job_checkpoints_excel_and_keeps_processing_skips(
     monkeypatch, tmp_path: Path
 ) -> None:

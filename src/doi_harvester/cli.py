@@ -30,7 +30,7 @@ from .config import (
 from .doctor import run_doctor
 from .doi import InvalidDoiError, doi_slug, normalize_doi
 from .elsevier import ElsevierApiClient
-from .job_runner import run_broker
+from .job_runner import _write_supplement_results_csv, run_broker, run_job
 from .job_store import JobStore
 from .papers import PaperJob, PapersFileError, load_paper_jobs
 from .pipeline import Harvester
@@ -60,11 +60,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选审查报告目录；未指定时不写入批次报告。",
     )
     download.add_argument("--email", help="Crossref/OpenAlex 礼貌池联系邮箱。")
+    download.add_argument("--results-csv", type=Path, help="补充材料逐附件结果 CSV 的绝对路径。")
     download.add_argument("--overwrite", action="store_true", help="覆盖已验证的现有 PDF。")
-    download.add_argument(
+    supplement_modes = download.add_mutually_exclusive_group()
+    supplement_modes.add_argument(
         "--supplements",
         action="store_true",
         help="在正文完成后发现并保存补充材料；需要可用浏览器会话。",
+    )
+    supplement_modes.add_argument(
+        "--supplements-only",
+        action="store_true",
+        help="仅下载补充材料，不请求正文 PDF。",
     )
     download.add_argument(
         "--browser-fallback",
@@ -79,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--profile-dir", type=Path, help="持久化浏览器配置目录。")
     download.add_argument("--headless", action="store_true", help="以无界面模式运行浏览器兜底。")
     download.add_argument(
+        "--browser-display", choices=["foreground", "off"],
+        help="每篇下载前显示出版社前台页面；默认 foreground，--headless 默认 off。",
+    )
+    download.add_argument(
         "--interactive-wait",
         type=float,
         default=0.0,
@@ -87,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--challenge-policy",
         choices=["pause", "skip", "fail-fast"],
-        help="验证页处理策略；前台默认 pause，后台或无头模式默认 skip。",
+        help="验证页处理策略；可见浏览器默认 pause，无头模式默认 skip。",
     )
     download.add_argument(
         "--challenge-timeout",
@@ -100,11 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--detach", action="store_true", help="创建可恢复任务并交给后台 Broker 串行处理。"
     )
-    download.add_argument("--workbook", type=Path, help="后台任务完成批次后回写的 Excel 路径。")
+    download.add_argument("--workbook", type=Path, help="可恢复任务完成批次后回写的 Excel 路径。")
     download.add_argument("--node-path", type=Path, help="工作簿脚本使用的 Node.js。")
     download.add_argument("--node-modules", type=Path, help="工作簿脚本依赖目录。")
     download.add_argument(
-        "--batch-size", type=int, default=100, help="后台任务每次检查点的条目数，最大 100。"
+        "--batch-size", type=int, default=100, help="任务每次检查点的条目数，最大 100。"
     )
     download.add_argument(
         "--access-environment",
@@ -115,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     auth = subparsers.add_parser("auth", help="在专用浏览器配置中初始化出版社授权会话。")
     auth.add_argument(
         "--publisher",
-        choices=["acs", "elsevier", "rsc"],
+        choices=["acs", "elsevier", "rsc", "wiley"],
         required=True,
         help="要初始化的出版社。",
     )
@@ -175,9 +186,18 @@ def build_parser() -> argparse.ArgumentParser:
         item = job_commands.add_parser(command, help=f"{command} 指定任务。")
         item.add_argument("job_id")
         if command == "status":
-            item.add_argument("--compact", action="store_true", help="仅输出低频监控所需字段。")
+            item.add_argument("--compact", action="store_true", help="仅输出监督所需状态字段。")
         if command == "tail":
             item.add_argument("--limit", type=int, default=30)
+        if command == "resume":
+            item.add_argument(
+                "--detach", action="store_true", help="把恢复后的任务交给后台 Broker。"
+            )
+            item.add_argument(
+                "--retry-failed",
+                action="store_true",
+                help="同时重试普通失败条目；用于审查后的定向恢复。",
+            )
 
     doctor = subparsers.add_parser("doctor", help="检查配置、任务库、浏览器和出版社规则。")
     doctor.add_argument("--network", action="store_true", help="执行真实 Elsevier API 验证。")
@@ -342,8 +362,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(str(exc)) from exc
 
     challenge_policy = args.challenge_policy
+    if args.headless and args.browser_display == "foreground":
+        raise SystemExit("--headless 与 --browser-display foreground 不能同时使用。")
+    browser_display = args.browser_display or ("off" if args.headless else "foreground")
+    if args.results_csv and not (args.supplements or args.supplements_only):
+        raise SystemExit("--results-csv 需要 --supplements 或 --supplements-only。")
     if challenge_policy is None:
-        challenge_policy = "skip" if args.headless or args.detach else "pause"
+        challenge_policy = "skip" if args.headless else "pause"
     challenge_timeout = (
         args.interactive_wait if args.interactive_wait > 0 else args.challenge_timeout
     )
@@ -352,15 +377,16 @@ def main(argv: list[str] | None = None) -> int:
         "interactive_wait_seconds": args.interactive_wait,
         "challenge_policy": challenge_policy,
         "challenge_timeout_seconds": challenge_timeout,
+        "keep_browser_open": not args.headless and challenge_policy == "pause",
     }
     if args.browser_channel is not None:
         browser_options["channel"] = args.browser_channel
     if args.profile_dir is not None:
         browser_options["profile_dir"] = args.profile_dir
 
-    if args.detach:
-        if args.overwrite or args.supplements:
-            raise SystemExit("后台任务暂不支持 --overwrite 或 --supplements。")
+    if args.detach or args.papers_file is not None:
+        if args.overwrite:
+            raise SystemExit("可恢复任务暂不支持 --overwrite。")
         runtime = default_runtime_dir().resolve()
         profile_dir = Path(
             browser_options.get("profile_dir") or runtime / "profiles" / "default"
@@ -384,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
         if args.workbook and not args.report_dir:
-            raise SystemExit("后台 Excel 回写要求同时提供 --report-dir。")
+            raise SystemExit("Excel 回写要求同时提供 --report-dir。")
         if bool(args.node_path) != bool(args.node_modules):
             raise SystemExit("--node-path 与 --node-modules 必须同时提供。")
         job_id = store.create_job(
@@ -397,29 +423,45 @@ def main(argv: list[str] | None = None) -> int:
                 "delay_seconds": args.delay,
                 "email": args.email or "",
                 "headless": args.headless,
+                "browser_display": browser_display,
                 "browser_channel": args.browser_channel or "",
+                "interactive_wait_seconds": args.interactive_wait,
+                "challenge_policy": challenge_policy,
+                "challenge_timeout_seconds": challenge_timeout,
+                "keep_browser_open": not args.headless and challenge_policy == "pause",
                 "access_environment": args.access_environment or "default",
+                "supplements": args.supplements,
+                "supplements_only": args.supplements_only,
+                "results_csv": str(args.results_csv.resolve()) if args.results_csv else "",
             },
             workbook_path=args.workbook,
             node_path=args.node_path,
             node_modules=args.node_modules,
             batch_size=args.batch_size,
         )
-        pid = BrokerManager(profile_dir=profile_dir, runtime_dir=runtime).ensure_started()
-        print(f"任务已排队：{job_id}；Broker PID：{pid}")
-        print(f"查看状态：doi-harvester jobs status {job_id}")
-        return 0
+        if args.detach:
+            pid = BrokerManager(profile_dir=profile_dir, runtime_dir=runtime).ensure_started()
+            print(f"任务已排队：{job_id}；Broker PID：{pid}")
+            print(f"查看状态：doi-harvester jobs status {job_id}")
+            return 0
+        print(f"任务开始：{job_id}；前台监督模式。", flush=True)
+        status = run_job(job_id, store=store)
+        print(f"任务结束：{job_id}；状态：{status}", flush=True)
+        return 0 if status == "completed" else 2
 
     harvester = Harvester(
         output_dir=args.output_dir,
         browser_fallback=args.browser_fallback,
         email=args.email,
         browser_options=browser_options,
-        download_supplements=args.supplements,
+        download_supplements=args.supplements or args.supplements_only,
+        supplements_only=args.supplements_only,
+        browser_display=browser_display,
         access_store=AccessPolicyStore(environment=args.access_environment),
     )
     serialized: list[dict[str, object]] = []
     for index, (doi, paper_job) in enumerate(tasks):
+        harvester.display_rank = paper_job.rank if paper_job else index + 1
         if paper_job is None:
             result = harvester.download(doi, overwrite=args.overwrite)
         else:
@@ -441,16 +483,37 @@ def main(argv: list[str] | None = None) -> int:
         marker = "成功" if result.success else "失败"
         print(f"[{marker}] {doi} -> {result.pdf_path or result.article_dir}")
         reason = result.reason or result.status
-        if (
-            challenge_policy == "fail-fast"
-            and reason in {"challenge_required", "authentication_required"}
-        ):
+        if challenge_policy == "fail-fast" and reason in {
+            "challenge_required",
+            "authentication_required",
+        }:
             print("检测到需要人工验证的页面，已按 fail-fast 策略停止后续 DOI。")
+            break
+        if reason.startswith("browser_display_") or reason in {
+            "browser_not_foreground", "browser_not_visible"
+        }:
+            print(f"浏览器页面不可见，已停止队列：{reason}")
             break
         if index < len(tasks) - 1 and args.delay > 0:
             time.sleep(args.delay)
 
     succeeded = sum(bool(item["success"]) for item in serialized)
+    if args.results_csv:
+        _write_supplement_results_csv(
+            [
+                {
+                    "rank": item.get("rank", index + 1),
+                    "doi": item["doi"],
+                    "status": item["status"],
+                    "supplement_status": item.get("supplement_status", "not_requested"),
+                    "supplements": item.get("supplements", []),
+                    "supplement_attempts": item.get("supplement_attempts", []),
+                    "failure_reason": item.get("reason", ""),
+                }
+                for index, item in enumerate(serialized)
+            ],
+            args.results_csv.resolve(),
+        )
     if args.report_dir is None:
         print(f"汇总：{succeeded}/{len(serialized)} 成功；未生成审查报告。")
     else:
@@ -615,15 +678,20 @@ def _run_jobs(args: argparse.Namespace) -> int:
         return 0
     if args.jobs_command == "resume":
         try:
-            count = store.prepare_resume(args.job_id)
+            count = store.prepare_resume(args.job_id, retry_failed=args.retry_failed)
         except ValueError as exc:
             print(f"[失败] {exc}")
             return 2
         runtime = default_runtime_dir().resolve()
         profile = Path(job["profile_dir"] or runtime / "profiles" / "default")
-        pid = BrokerManager(profile_dir=profile, runtime_dir=runtime).ensure_started()
-        print(f"任务已恢复：{args.job_id}；待处理 {count} 条；Broker PID：{pid}")
-        return 0
+        if args.detach:
+            pid = BrokerManager(profile_dir=profile, runtime_dir=runtime).ensure_started()
+            print(f"任务已恢复：{args.job_id}；待处理 {count} 条；Broker PID：{pid}")
+            return 0
+        print(f"任务已恢复：{args.job_id}；前台处理 {count} 条。", flush=True)
+        status = run_job(args.job_id, store=store)
+        print(f"任务结束：{args.job_id}；状态：{status}", flush=True)
+        return 0 if status == "completed" else 2
     return 2
 
 

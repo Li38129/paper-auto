@@ -5,7 +5,7 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 # AutoPaper Literature
 
-把研究主题转换为经过核验、去重和排序的论文清单，在用户指定的论文根目录维护 `文献检索汇总.xlsx`，创建稳定编号目录，并使用本仓库的 DOI Harvester 下载可合法获取的正文 PDF。
+把研究主题转换为经过核验、去重和排序的论文清单，在用户指定的论文根目录维护 `文献检索汇总.xlsx`，创建稳定编号目录，并使用本仓库的 DOI Harvester 下载可合法获取的正文 PDF 或用户指定的补充材料。
 
 ## 确定目标目录与任务口径
 
@@ -36,9 +36,12 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 ## 创建论文目录与下载正文
 
+下载默认逐篇显示出版社浏览器前台页面；页面不可见时保留任务并暂停，不能将其记为无补充材料。
+
 1. 只创建工作簿脚本在 `resolved-records.json` 中返回且尚不存在的目录。保留目标目录的全部既有内容，不覆盖、不删除、不移动。
 2. 创建或确认目录后，读取并严格执行 [DOI Harvester 联动规则](references/doi-harvester.md)。用户授权本 Skill 创建目录即代表同时授权下载正文，无需再次确认。
 3. 只把有可靠 DOI 的记录写入 `papers.json`。默认不下载补充材料，除非用户明确要求。
+   已提供固定编号 DOI CSV 且明确要求补充材料时，使用 `scripts/si-csv-batch.py` 保留原序号；先写入工作簿，再创建论文目录。无效或占位 DOI 仍保留在目标清单与工作簿，标为待核验且不进入下载器；不得因个别无效 DOI 放弃整批。正文和 SI 分别维护状态。下载模式见 [DOI Harvester 联动规则](references/doi-harvester.md)。
 4. 每次下载或重试结束后，先把对应 `batch-report.json` 回写 Excel。只有 Excel 写回成功、所有可下载条目成功且 PDF 校验通过时，才能清理一次性任务目录。
 5. Excel 最终写回失败、正文下载失败或仍需人工授权时保留任务目录，并报告可恢复路径和原因。
 

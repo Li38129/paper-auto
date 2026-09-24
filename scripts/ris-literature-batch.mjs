@@ -144,13 +144,15 @@ async function buildRecords(args) {
     const rank = start + offset;
     const title = firstValue(record, "TI", "T1");
     const doi = normalizeDoi(firstValue(record, "DO"));
-    if (!title || !doi) {
-      throw new Error(`第 ${rank} 条记录缺少题名或 DOI。`);
+    if (!title) {
+      throw new Error(`第 ${rank} 条记录缺少题名。`);
     }
-    if (seenDois.has(doi)) {
+    if (doi && seenDois.has(doi)) {
       throw new Error(`批次中存在重复 DOI：${doi}`);
     }
-    seenDois.add(doi);
+    if (doi) {
+      seenDois.add(doi);
+    }
     const yearText = firstValue(record, "PY", "Y1");
     const yearMatch = yearText.match(/\d{4}/);
     return {

@@ -306,7 +306,7 @@ def test_pipeline_adds_supplements_only_when_explicitly_requested(
 
     monkeypatch.setattr(
         supplements,
-        "BrowserSupplementDownloader",
+        "HttpSupplementDownloader",
         FakeSupplementDownloader,
     )
     harvester = Harvester(
@@ -323,6 +323,28 @@ def test_pipeline_adds_supplements_only_when_explicitly_requested(
     assert result.supplement_status == "downloaded"
     assert result.supplements[0].name == "support.docx"
     assert not (article_dir / "manifest.json").exists()
+
+
+def test_supplements_only_never_requests_article(monkeypatch, tmp_path: Path) -> None:
+    from doi_harvester import supplements
+
+    class FakeSupplementDownloader:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def download(self, **_kwargs: object):
+            return "not_found", [], []
+
+    monkeypatch.setattr(supplements, "HttpSupplementDownloader", FakeSupplementDownloader)
+    harvester = Harvester(
+        output_dir=tmp_path,
+        download_supplements=True,
+        supplements_only=True,
+    )
+    result = harvester.download("10.1000/example")
+    assert result.success is True
+    assert result.status == "not_found"
+    assert not (result.article_dir / "article.pdf").exists()
 
 
 def test_pipeline_does_not_call_supplement_downloader_by_default(

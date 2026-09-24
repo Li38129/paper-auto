@@ -37,6 +37,8 @@ class Harvester:
         transport: HttpPdfTransport | None = None,
         browser_options: dict[str, Any] | None = None,
         download_supplements: bool = False,
+        supplements_only: bool = False,
+        browser_display: str = "off",
         elsevier: ElsevierApiClient | None = None,
         elsevier_credentials: ElsevierCredentials | None = None,
         access_store: AccessPolicyStore | None = None,
@@ -49,6 +51,11 @@ class Harvester:
         self.transport = transport or HttpPdfTransport()
         self.browser_options = browser_options or {}
         self.download_supplements = download_supplements
+        self.supplements_only = supplements_only
+        self.browser_display = browser_display
+        self.visible_browser = None
+        self.display_rank: int | None = None
+        self._last_display = None
         self.elsevier = elsevier or ElsevierApiClient()
         self.elsevier_credentials = elsevier_credentials
         self.access_store = access_store or AccessPolicyStore()
@@ -65,8 +72,53 @@ class Harvester:
         article_dir = (
             Path(article_dir) if article_dir is not None else self.output_dir / doi_slug(doi)
         )
+        if self.browser_display == "foreground":
+            from .visible_browser import VisibleBrowser
+
+            if self.visible_browser is None:
+                from .browser import BrowserPdfDownloader
+
+                self.visible_browser = VisibleBrowser(
+                    profile_dir=Path(
+                        self.browser_options.get("profile_dir")
+                        or BrowserPdfDownloader._default_profile_dir()
+                    ),
+                    channel=self.browser_options.get("channel"),
+                )
+            mode = (
+                "仅补充材料" if self.supplements_only
+                else "正文与补充材料" if self.download_supplements else "仅正文"
+            )
+            display = self.visible_browser.show(doi=doi, rank=self.display_rank, mode=mode)
+            self._last_display = display
+            if display.status != "visible":
+                return DownloadResult(
+                    doi=doi, success=False, status=display.status,
+                    article_dir=article_dir, reason=display.status,
+                    outcome=("auth_required" if display.status in {
+                        "challenge_required", "authentication_required"
+                    } else "blocked"),
+                    attempts=[Attempt(
+                        source="browser_display", url=display.url, success=False,
+                        reason=display.status, stage="browser_display",
+                    )],
+                )
         pdf_path = article_dir / "article.pdf"
         article_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.supplements_only:
+            result = DownloadResult(
+                doi=doi,
+                success=False,
+                status="supplement_pending",
+                article_dir=article_dir,
+            )
+            self._add_supplements(result)
+            result.success = result.supplement_status in {"downloaded", "cached", "not_found"}
+            result.status = result.supplement_status
+            result.reason = "" if result.success else result.supplement_status
+            self._display_result(result)
+            return result
 
         if pdf_path.exists() and not overwrite and is_valid_pdf(pdf_path):
             result = DownloadResult(
@@ -80,8 +132,15 @@ class Harvester:
                 quality="pdf",
             )
             self._add_supplements(result)
+            self._display_result(result)
             return result
 
+        if self.visible_browser is not None:
+            self.visible_browser.update(
+                doi=doi, rank=self.display_rank,
+                mode="正文与补充材料" if self.download_supplements else "仅正文",
+                stage="获取正文",
+            )
         metadata = self._metadata(doi)
         open_candidates = self.openalex.fetch_candidates(doi)
         result = DownloadResult(
@@ -123,6 +182,7 @@ class Harvester:
                 )
             )
             self._add_supplements(result)
+            self._display_result(result)
             return result
 
         profile = infer_publisher_profile(
@@ -169,7 +229,28 @@ class Harvester:
         self._classify_result(result)
 
         self._add_supplements(result)
+        self._display_result(result)
         return result
+
+    def _display_result(self, result: DownloadResult) -> None:
+        if self.visible_browser is not None:
+            if self._last_display is not None:
+                result.attempts.insert(0, Attempt(
+                    source="browser_display", url=self._last_display.url,
+                    success=True, reason=self._last_display.event,
+                    stage="browser_display", final_url=self._last_display.url,
+                ))
+            mode = (
+                "仅补充材料" if self.supplements_only
+                else "正文与补充材料" if self.download_supplements else "仅正文"
+            )
+            self.visible_browser.update(
+                doi=result.doi, rank=self.display_rank, mode=mode,
+                stage=(f"正文:{result.status}；SI:{result.supplement_status}"
+                       if self.download_supplements and not self.supplements_only
+                       else result.supplement_status if self.supplements_only else result.status),
+                attachments=len(result.supplements),
+            )
 
     def _download_candidates(
         self,
@@ -277,9 +358,7 @@ class Harvester:
         elif reason in {"challenge_required", "authentication_required"}:
             profile = infer_publisher_profile(result.doi, publisher=result.publisher)
             publisher_key = (
-                profile.key
-                if profile and profile.key in {"acs", "elsevier", "rsc"}
-                else "acs"
+                profile.key if profile and profile.key in {"acs", "elsevier", "rsc"} else "acs"
             )
             result.outcome = "auth_required"
             result.next_action = NextAction(
@@ -303,13 +382,18 @@ class Harvester:
     def _add_supplements(self, result: DownloadResult) -> None:
         if not self.download_supplements:
             return
-        profile_dir = self.browser_options.get("profile_dir")
-        if profile_dir is None:
-            result.supplement_status = "browser_session_required"
-            return
-        from .supplements import BrowserSupplementDownloader
+        if self.visible_browser is not None:
+            self.visible_browser.update(
+                doi=result.doi, rank=self.display_rank,
+                mode="仅补充材料" if self.supplements_only else "正文与补充材料",
+                stage="发现及下载 SI",
+            )
+        from .supplements import HttpSupplementDownloader
 
-        downloader = BrowserSupplementDownloader(profile_dir=Path(profile_dir))
+        profile_dir = self.browser_options.get("profile_dir")
+        downloader = HttpSupplementDownloader(
+            profile_dir=Path(profile_dir) if profile_dir else None
+        )
         status, artifacts, attempts = downloader.download(
             doi=result.doi,
             article_dir=result.article_dir,
@@ -317,6 +401,9 @@ class Harvester:
         result.supplement_status = status
         result.supplements = artifacts
         result.supplement_attempts = attempts
+        if status not in {"downloaded", "cached", "not_found"}:
+            result.success = False
+            result.reason = status
 
     def _metadata(self, doi: str) -> ArticleMetadata:
         try:

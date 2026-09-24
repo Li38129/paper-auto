@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from doi_harvester.browser import (
+    AuthorizationResult,
     BrowserAuthorizer,
     BrowserPdfDownloader,
     ProfileInUseError,
@@ -266,6 +267,52 @@ def test_browser_pause_policy_waits_on_challenge(
     assert waits == [42]
     assert result.success is True
     assert destination.read_bytes() == body
+
+
+def test_supervised_browser_bootstraps_reusable_cdp_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from doi_harvester import browser as browser_module
+
+    body = b"%PDF-1.7\n" + b"x" * 2048
+    install_fake_playwright(monkeypatch, body=body)
+    calls: list[tuple[str, str, float]] = []
+
+    class FakeAuthorizer:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def authorize(
+            self, *, publisher: str, doi: str, timeout_seconds: float
+        ) -> AuthorizationResult:
+            calls.append((publisher, doi, timeout_seconds))
+            return AuthorizationResult(
+                success=False,
+                status="authenticated",
+                final_url=f"https://doi.org/{doi}",
+                profile_dir=tmp_path / "profile",
+                cdp_endpoint="http://127.0.0.1:9222",
+            )
+
+    monkeypatch.setattr(browser_module, "BrowserAuthorizer", FakeAuthorizer)
+    monkeypatch.setattr(
+        browser_module, "_read_cdp_endpoint", lambda _profile: "http://127.0.0.1:9222"
+    )
+    destination = tmp_path / "article.pdf"
+    downloader = BrowserPdfDownloader(
+        profile_dir=tmp_path / "profile",
+        challenge_policy="pause",
+        keep_browser_open=True,
+    )
+
+    result = downloader.download(
+        doi="10.1000/example",
+        destination=destination,
+        candidate_urls=["https://publisher.test/article.pdf"],
+    )
+
+    assert calls == [("download", "10.1000/example", 0)]
+    assert result.success is True
 
 
 def test_browser_reuses_existing_work_page(tmp_path: Path) -> None:

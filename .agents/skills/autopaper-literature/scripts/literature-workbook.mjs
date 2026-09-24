@@ -24,6 +24,7 @@ const HEADERS = [
   "首次收录时间",
   "最后更新时间",
 ];
+const SI_HEADERS = ["序号", "DOI", "SI状态", "附件名", "来源链接", "本地路径", "格式", "字节", "SHA256", "附件结果", "失败原因"];
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATE = path.resolve(
@@ -117,7 +118,16 @@ function objectToRow(record) {
 function validateExistingRows(rows) {
   const doiKeys = new Set();
   const titleKeys = new Map();
+  const sequences = new Set();
+  const folders = new Set();
   for (const row of rows) {
+    const sequence = Number(row["序号"]);
+    const folder = cleanText(row["目录名"]).toLowerCase();
+    if (sequences.has(sequence) || folders.has(folder)) {
+      throw new Error(`工作簿中存在重复序号或目录：${sequence} / ${folder}`);
+    }
+    sequences.add(sequence);
+    folders.add(folder);
     const doi = normalizeDoi(row.DOI);
     const title = normalizeTitle(row["论文题名"]);
     if (doi) {
@@ -158,10 +168,14 @@ function validateRecordsPayload(payload) {
     }
     ranks.add(rank);
     const title = cleanText(raw.title);
-    if (!title) {
+    if (!title && !cleanText(raw.doi)) {
       throw new Error(`第 ${index + 1} 条记录缺少 title。`);
     }
     const doi = normalizeDoi(raw.doi);
+    const folderName = cleanText(raw.folder_name);
+    if (folderName && (folderName !== safeFolderLabel(folderName) || folderName === "." || folderName === "..")) {
+      throw new Error(`第 ${index + 1} 条记录的 folder_name 不是安全目录名。`);
+    }
     const titleKey = normalizeTitle(title);
     if (doi && dois.has(doi)) {
       throw new Error(`本次记录中存在重复 DOI：${doi}`);
@@ -176,6 +190,8 @@ function validateRecordsPayload(payload) {
     titles.set(titleKey, doi);
     return {
       rank,
+      sequence: raw.sequence === undefined ? null : Number(raw.sequence),
+      folderName,
       folderLabel: safeFolderLabel(raw.folder_label),
       title,
       doi,
@@ -287,18 +303,35 @@ function upsertRecords(rows, payload, workbookPath, folderRoot) {
 
     let row;
     if (rowIndex === undefined) {
-      maxSequence += 1;
+      const requestedSequence = record.sequence;
+      if (requestedSequence !== null && (!Number.isInteger(requestedSequence) || requestedSequence < 1)) {
+        throw new Error(`序号无效：${requestedSequence}`);
+      }
+      if (requestedSequence !== null && rows.some((item) => Number(item["序号"]) === requestedSequence)) {
+        throw new Error(`序号冲突：${requestedSequence}`);
+      }
+      if (record.folderName && rows.some((item) => cleanText(item["目录名"]).toLowerCase() === record.folderName.toLowerCase())) {
+        throw new Error(`目录名冲突：${record.folderName}`);
+      }
+      const sequence = requestedSequence ?? maxSequence + 1;
+      maxSequence = Math.max(maxSequence, sequence);
       row = Object.fromEntries(HEADERS.map((header) => [header, ""]));
-      row["序号"] = maxSequence;
-      row["目录名"] = `${maxSequence}${record.folderLabel}`;
+      row["序号"] = sequence;
+      row["目录名"] = record.folderName || `${sequence}${record.folderLabel}`;
       row["首次收录时间"] = timestamp;
       rows.push(row);
       rowIndex = rows.length - 1;
     } else {
       row = rows[rowIndex];
+      if (record.sequence !== null && Number(row["序号"]) !== record.sequence) {
+        throw new Error(`DOI ${record.doi} 的已有序号与导入序号不一致。`);
+      }
+      if (record.folderName && row["目录名"] !== record.folderName) {
+        throw new Error(`DOI ${record.doi} 的已有目录与导入目录不一致。`);
+      }
     }
 
-    row["论文题名"] = record.title;
+    row["论文题名"] = record.title || row["论文题名"] || "";
     row.DOI = record.doi || normalizeDoi(row.DOI);
     row["年份"] = record.year || row["年份"] || "";
     row["期刊"] = record.journal || row["期刊"] || "";
@@ -308,13 +341,11 @@ function upsertRecords(rows, payload, workbookPath, folderRoot) {
     row["检索主题"] = mergeTopic(row["检索主题"], payload.topic);
     row["文献入口"] = record.sourceUrl || row["文献入口"] || "";
     row["最后更新时间"] = timestamp;
-    row["PDF路径"] = "";
-    row["下载来源"] = "";
-    if (row.DOI) {
+    if (row.DOI && !row["下载状态"]) {
       row["下载成功"] = "未尝试";
       row["下载状态"] = "pending";
       row["失败原因"] = "";
-    } else {
+    } else if (!row.DOI && !row["下载状态"]) {
       row["下载成功"] = "不适用";
       row["下载状态"] = "missing_doi";
       row["失败原因"] = "缺少可靠 DOI，未进入下载器";
@@ -338,6 +369,16 @@ function applyReport(rows, results) {
   const indexes = updateRowMap(rows);
   const timestamp = nowText();
   for (const result of results) {
+    if (result.download_mode === "supplements_only") {
+      const doi = normalizeDoi(result.doi);
+      const row = rows[indexes.byDoi.get(doi)];
+      if (row && !cleanText(row["PDF路径"]) && !cleanText(row["下载来源"]) && ["downloaded", "cached"].includes(cleanText(row["下载状态"]))) {
+        row["下载成功"] = "未尝试";
+        row["下载状态"] = "pending";
+        row["失败原因"] = "";
+      }
+      continue;
+    }
     const doi = normalizeDoi(result.doi);
     const rowIndex = indexes.byDoi.get(doi);
     if (rowIndex === undefined) {
@@ -352,6 +393,70 @@ function applyReport(rows, results) {
     row["PDF路径"] = cleanText(result.pdf_path);
     row["下载来源"] = cleanText(result.source);
     row["最后更新时间"] = timestamp;
+  }
+}
+
+function updateSupplementSheet(workbook, results) {
+  const relevant = results.filter((item) => item.download_mode !== "article");
+  if (!relevant.length) return;
+  let sheet;
+  try { sheet = workbook.worksheets.getItem("补充材料"); }
+  catch { sheet = workbook.worksheets.add("补充材料"); }
+  const usedRange = sheet.getUsedRange();
+  const oldValues = usedRange?.values?.slice(1) ?? [];
+  const dois = new Set(relevant.map((item) => normalizeDoi(item.doi)));
+  const retained = oldValues.filter((row) => (cleanText(row[1]) || cleanText(row[0])) && !dois.has(normalizeDoi(row[1])));
+  const rows = [...retained];
+  for (const result of relevant) {
+    const files = Array.isArray(result.supplements) ? result.supplements : [];
+    const attempts = Array.isArray(result.supplement_attempts) ? result.supplement_attempts : [];
+    if (!files.length && !attempts.length) {
+      rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "unconfirmed", "", "", "", "", "", "", "", result.failure_reason || ""]);
+    }
+    for (const file of files) {
+      const attempt = attempts.find((item) => item.url === file.url || item.final_url === file.url);
+      rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "", file.name || "", file.url || "", file.path || "", file.content_type || "", file.bytes_written || "", file.sha256 || "", attempt?.reason || "downloaded", ""]);
+    }
+    for (const attempt of attempts.filter((item) => !item.success)) {
+      rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "", "", attempt.url || "", "", "", "", "", "failed", attempt.reason || "failed"]);
+    }
+  }
+  rows.sort((left, right) => Number(left[0]) - Number(right[0]) || String(left[3]).localeCompare(String(right[3])));
+  sheet.getRange("A1:K1").values = [SI_HEADERS];
+  formatSupplementSheet(sheet);
+  const total = Math.max(oldValues.filter((row) => cleanText(row[1])).length, rows.length);
+  if (total) sheet.getRangeByIndexes(1, 0, total, SI_HEADERS.length).values = [...rows, ...Array.from({length: total - rows.length}, () => Array(SI_HEADERS.length).fill(""))];
+}
+
+function formatSupplementSheet(sheet) {
+  const widths = [9, 32, 18, 42, 72, 72, 26, 15, 67, 18, 38];
+  const heading = sheet.getRange("A1:K1");
+  heading.format.fill = "#24486A";
+  heading.format.font.color = "#FFFFFF";
+  heading.format.font.bold = true;
+  heading.format.rowHeight = 26;
+  widths.forEach((width, index) => {
+    sheet.getRangeByIndexes(0, index, 1, 1).format.columnWidth = width;
+  });
+  sheet.freezePanes.freezeRows(1);
+}
+
+function seedSupplementSheet(workbook, resolved) {
+  let sheet;
+  try { sheet = workbook.worksheets.getItem("补充材料"); }
+  catch { sheet = workbook.worksheets.add("补充材料"); }
+  const usedRange = sheet.getUsedRange();
+  const old = usedRange?.values?.slice(1) ?? [];
+  const knownDois = new Set(old.map((row) => normalizeDoi(row[1])).filter(Boolean));
+  const knownSequences = new Set(old.map((row) => Number(row[0])).filter(Number.isInteger));
+  const additions = resolved.filter((record) => record.doi
+    ? !knownDois.has(normalizeDoi(record.doi))
+    : !knownSequences.has(Number(record.sequence)));
+  sheet.getRange("A1:K1").values = [SI_HEADERS];
+  formatSupplementSheet(sheet);
+  if (additions.length) {
+    const existingCount = old.filter((row) => cleanText(row[1]) || cleanText(row[0])).length;
+    sheet.getRangeByIndexes(existingCount + 1, 0, additions.length, SI_HEADERS.length).values = additions.map((record) => [record.sequence, record.doi, "pending", "", "", "", "", "", "", "", ""]);
   }
 }
 
@@ -442,10 +547,14 @@ async function main() {
   if (recordsPath) {
     const recordsPayload = validateRecordsPayload(await readJson(recordsPath));
     resolved = upsertRecords(rows, recordsPayload, workbookPath, folderRoot);
+    if (recordsPayload.records.some((record) => record.sequence !== null)) {
+      seedSupplementSheet(workbook, resolved);
+    }
   }
   if (reportPath) {
     const results = validateReportPayload(await readJson(reportPath));
     applyReport(rows, results);
+    updateSupplementSheet(workbook, results);
   }
 
   writeRowsToTable(sheet, table, rows, existingCount);

@@ -99,7 +99,9 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
   --output-dir downloads
 ```
 
-可恢复后台任务：
+可恢复任务（默认前台监督；显式增加 `--detach` 才转入后台）：
+
+下载默认使用 `--browser-display foreground`，每篇先打开出版社页面并确认窗口处于 Windows 前台，再进行缓存检查和正文/SI 请求。普通页面显示可收起的状态条；验证页保留原貌。页面无法显示时任务暂停并保留检查点。需要无界面运行时显式使用 `--browser-display off`，或沿用 `--headless`；`--headless` 与显式 foreground 冲突。MCP `download` 使用同名 `browser_display` 参数。
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
@@ -117,10 +119,11 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 .\scripts\doi-harvester.ps1 jobs status <任务ID> --compact
 .\scripts\doi-harvester.ps1 jobs tail <任务ID>
 .\scripts\doi-harvester.ps1 jobs resume <任务ID>
+.\scripts\doi-harvester.ps1 jobs resume <任务ID> --detach
 .\scripts\doi-harvester.ps1 jobs cancel <任务ID>
 ```
 
-`--compact` 只返回任务状态、计数、最近进展、Excel 回写状态和待处理事件，适合每 30 分钟低频检查。后台任务遇验证会停止在当前 DOI，后续论文保持待处理；`jobs resume` 对同一任务只允许一次。
+`--compact` 返回任务状态、计数、最近进展、Excel 回写状态和待处理事件。默认前台命令会持续输出当前 DOI、处理结果和计数；后台任务遇验证会停止在当前 DOI，后续论文保持待处理。人工处理后用 `jobs resume` 前台恢复；新的独立验证允许再次恢复，正在排队或运行的任务会拒绝重复启动。
 
 本机机构访问策略：
 
@@ -175,9 +178,8 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
   --challenge-timeout 600
 ```
 
-`papers.json` 中每条记录需包含 `rank`、`doi`、`title` 和绝对路径
-`folder_path`。交换文件放在 `temp\doi-harvester\jobs`，不要放入论文数据目录。
-默认只下载期刊正文；只有显式传入 `--supplements` 时才会下载补充材料。
+`papers.json` 中每条记录需包含 `rank`、`doi` 和绝对路径 `folder_path`；可核验时填写 `title`。交换文件放在 `temp\doi-harvester\jobs`，不要放入论文数据目录。
+默认只下载期刊正文；`--supplements` 下载正文和补充材料，`--supplements-only` 只下载补充材料，两者互斥。两种 SI 模式均支持可恢复任务、逐附件报告和 `--results-csv`。固定编号 CSV 可先用 `scripts/si-csv-batch.py` 导入，保留原序号并生成 Excel、目标 CSV 和 `papers.json`。补充材料保存在每篇目录的 `supplements` 子目录。
 
 ACS、Elsevier 或 RSC 等需要已有订阅会话的出版社：
 
@@ -188,12 +190,10 @@ ACS、Elsevier 或 RSC 等需要已有订阅会话的出版社：
   --auth-timeout 600
 ```
 
-Elsevier 或 RSC 可把 `--publisher acs` 分别替换为 `--publisher elsevier` 或
-`--publisher rsc`。前台可见下载遇到
+Elsevier、RSC 或 Wiley 可把 `--publisher acs` 分别替换为 `--publisher elsevier`、
+`--publisher rsc` 或 `--publisher wiley`；Wiley 授权需同时传入 `--doi`。前台可见下载遇到
 `challenge_required` 或 `authentication_required` 时默认暂停最多 600 秒，不再切换到下一篇；
-`--challenge-policy skip` 可恢复原来的跳过行为，`fail-fast` 会停止后续 DOI。无头模式和
-`--detach` 后台任务默认不等待，后台任务会停在 `waiting_for_user`，完成授权后用
-`jobs resume <任务ID>` 恢复。
+`--challenge-policy skip` 可使用跳过行为，`fail-fast` 会停止后续 DOI。无头模式默认不等待；可见浏览器即使在显式后台模式下也会保留验证策略和等待时间。等待超时后任务停在 `waiting_for_user`，普通 Chrome/Edge 与当前页面继续保持打开，完成授权后用 `jobs resume <任务ID>` 恢复。
 
 请在打开的可见 Chrome/Edge 中亲自完成安全验证和学校 SSO。程序会检测页面状态，只有 PDF 入口连续三次稳定出现才会确认 `ready`，不会再依赖固定等待时间。
 

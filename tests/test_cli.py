@@ -10,6 +10,17 @@ from doi_harvester.elsevier import ElsevierDownload
 from doi_harvester.models import DownloadResult
 
 
+def test_supplement_modes_are_mutually_exclusive() -> None:
+    parser = cli.build_parser()
+    assert parser.parse_args(["download", "--doi", "10.1000/x"]).supplements is False
+    assert parser.parse_args(["download", "--doi", "10.1000/x", "--supplements"]).supplements
+    assert parser.parse_args(
+        ["download", "--doi", "10.1000/x", "--supplements-only"]
+    ).supplements_only
+    with pytest.raises(SystemExit):
+        parser.parse_args(["download", "--doi", "10.1000/x", "--supplements", "--supplements-only"])
+
+
 def test_load_dois_reads_file_normalizes_and_deduplicates(tmp_path: Path) -> None:
     doi_file = tmp_path / "dois.txt"
     doi_file.write_text(
@@ -245,6 +256,8 @@ def test_fail_fast_stops_after_auth_challenge(
 def test_main_downloads_papers_file_into_numbered_folders(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from doi_harvester import job_runner
+
     target_folder = tmp_path / "81 测试论文，IC=界面研究"
     papers_file = tmp_path / "papers.json"
     papers_file.write_text(
@@ -292,7 +305,7 @@ def test_main_downloads_papers_file_into_numbered_folders(
                 source="test",
             )
 
-    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    monkeypatch.setattr(job_runner, "Harvester", FakeHarvester)
 
     exit_code = cli.main(
         [
@@ -354,8 +367,7 @@ def test_auth_command_initializes_persistent_session(
 
 @pytest.mark.parametrize("publisher", ["elsevier", "rsc"])
 def test_auth_command_accepts_supported_publisher(
-    publisher: str,
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    publisher: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[str] = []
 
