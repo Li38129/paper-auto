@@ -36,7 +36,7 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 ## 创建论文目录与下载正文
 
-下载默认逐篇显示出版社浏览器前台页面；页面不可见时保留任务并暂停，不能将其记为无补充材料。
+下载默认逐篇在浏览器工作标签打开并核对对应 DOI 的出版社论文页面；页面未打开或无法核对时保留任务并暂停，不能将其记为无补充材料。Windows 前台焦点不影响已打开页面的下载。
 
 1. 只创建工作簿脚本在 `resolved-records.json` 中返回且尚不存在的目录。保留目标目录的全部既有内容，不覆盖、不删除、不移动。
 2. 创建或确认目录后，读取并严格执行 [DOI Harvester 联动规则](references/doi-harvester.md)。用户授权本 Skill 创建目录即代表同时授权下载正文，无需再次确认。

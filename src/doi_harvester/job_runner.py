@@ -24,10 +24,15 @@ class HarvesterLike(Protocol):
 
 
 def _is_recoverable_browser_error(reason: str) -> bool:
-    return reason.startswith(("cdp_error:", "browser_error:", "browser_display_")) or reason in {
-        "browser_executable_not_found",
+    reason_code = reason.partition(":")[0]
+    return reason.startswith(
+        ("cdp_error:", "browser_error:", "browser_display_")
+    ) or reason_code in {
         "browser_not_foreground",
         "browser_not_visible",
+        "browser_publisher_unavailable",
+        "browser_status_unavailable",
+        "browser_executable_not_found",
         "browser_error",
     }
 
@@ -261,10 +266,20 @@ def run_job(
         batch_size = min(max(int(job.get("batch_size") or 100), 1), 100)
         processed_since_sync = 0
         pending = active_store.pending_items(job_id)
+        retry_phase_seen = False
+        retry_phase_finished = False
         for index, item in enumerate(pending):
             if active_store.get_job(job_id)["status"] == "canceled":
                 break
             doi = str(item["doi"])
+            retry_priority = bool(item.get("retry_priority", 0))
+            if retry_priority:
+                retry_phase_seen = True
+                active_store.set_event(job_id, f"retrying_failed:{doi}")
+            elif retry_phase_seen and not retry_phase_finished:
+                print("旧失败项重试完成，开始处理剩余待下载条目。", flush=True)
+                active_store.set_event(job_id, "failed_retries_complete")
+                retry_phase_finished = True
             print(
                 f"[处理 {index + 1}/{len(pending)}] DOI：{doi}；题名：{item['title']}",
                 flush=True,
@@ -302,7 +317,7 @@ def run_job(
                 f"[{marker}] DOI：{doi}；状态：{result.status}；计数：{current['counts']}",
                 flush=True,
             )
-            if reason in {"challenge_required", "authentication_required"}:
+            if reason.startswith(("challenge_required", "authentication_required")):
                 final_url = next(
                     (
                         attempt.final_url or attempt.url

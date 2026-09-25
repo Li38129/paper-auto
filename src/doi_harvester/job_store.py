@@ -115,6 +115,7 @@ class JobStore:
                     supplement_status TEXT NOT NULL DEFAULT 'not_requested',
                     supplements_json TEXT NOT NULL DEFAULT '[]',
                     supplement_attempts_json TEXT NOT NULL DEFAULT '[]',
+                    retry_priority INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL,
                     UNIQUE(job_id, doi)
                 );
@@ -175,6 +176,7 @@ class JobStore:
                 "supplement_status": "TEXT NOT NULL DEFAULT 'not_requested'",
                 "supplements_json": "TEXT NOT NULL DEFAULT '[]'",
                 "supplement_attempts_json": "TEXT NOT NULL DEFAULT '[]'",
+                "retry_priority": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in item_columns:
                     connection.execute(f"ALTER TABLE job_items ADD COLUMN {name} {definition}")
@@ -365,6 +367,8 @@ class JobStore:
                 UPDATE job_items
                 SET status = ?, pdf_path = ?, source = ?, failure_reason = ?,
                     supplement_status = ?, supplements_json = ?, supplement_attempts_json = ?,
+                    retry_priority = CASE WHEN ? IN ('retryable', 'auth_required')
+                                           THEN retry_priority ELSE 0 END,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -378,6 +382,7 @@ class JobStore:
                     json.dumps(
                         [asdict(item) for item in result.supplement_attempts], ensure_ascii=False
                     ),
+                    item_status,
                     timestamp,
                     item_id,
                 ),
@@ -418,17 +423,29 @@ class JobStore:
             if str(job["status"]) in {"queued", "running", "awaiting_excel"}:
                 raise ValueError(f"任务当前为 {job['status']}，不能重复启动。")
             timestamp = _now()
-            statuses = ["retryable", "running", "auth_required"]
+            failed_count = 0
             if retry_failed:
-                statuses.append("failed")
+                failed_count = int(
+                    connection.execute(
+                        """
+                        UPDATE job_items SET status = 'pending', retry_priority = 1, updated_at = ?
+                        WHERE job_id = ? AND status = 'failed'
+                        """,
+                        (timestamp, job_id),
+                    ).rowcount
+                )
+            statuses = ["retryable", "running", "auth_required"]
             placeholders = ",".join("?" for _ in statuses)
             cursor = connection.execute(
                 f"""
                 UPDATE job_items SET status = 'pending', updated_at = ?
+                    , retry_priority = CASE WHEN status IN ('retryable', 'running', 'auth_required')
+                                             THEN 1 ELSE retry_priority END
                 WHERE job_id = ? AND status IN ({placeholders})
                 """,
                 (timestamp, job_id, *statuses),
             )
+            resumed_count = failed_count + int(cursor.rowcount)
             if cursor.rowcount == 0:
                 pending_count = connection.execute(
                     "SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status = 'pending'",
@@ -447,15 +464,16 @@ class JobStore:
                 (timestamp, timestamp, job_id),
             )
             connection.commit()
-            return int(cursor.rowcount)
+            return resumed_count
 
     def pending_items(self, job_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT rank, doi, title, folder_path, publisher, journal, issn, year, status
-                FROM job_items WHERE job_id = ? AND status = 'pending'
-                ORDER BY COALESCE(rank, id), id
+                SELECT rank, doi, title, folder_path, publisher, journal, issn, year,
+                       status, retry_priority
+                FROM job_items WHERE job_id = ? AND status IN ('pending', 'retryable')
+                ORDER BY retry_priority DESC, COALESCE(rank, id), id
                 """,
                 (job_id,),
             ).fetchall()
@@ -568,14 +586,17 @@ def _item_status(result: DownloadResult) -> str:
     if result.success:
         return "cached" if result.status == "cached" else "downloaded"
     reason = result.reason or result.status
-    if reason.startswith(("cdp_error:", "browser_error:", "browser_display_")) or reason in {
-        "browser_executable_not_found",
+    reason_code = reason.partition(":")[0]
+    if reason.startswith(("cdp_error:", "browser_error:", "browser_display_")) or reason_code in {
         "browser_not_foreground",
         "browser_not_visible",
+        "browser_publisher_unavailable",
+        "browser_status_unavailable",
+        "browser_executable_not_found",
         "browser_error",
     }:
         return "retryable"
-    if reason in {"challenge_required", "authentication_required"}:
+    if reason.startswith(("challenge_required", "authentication_required")):
         return "auth_required"
     if reason == "access_policy_skip_paid" or result.status == "policy_skipped":
         return "policy_skipped"

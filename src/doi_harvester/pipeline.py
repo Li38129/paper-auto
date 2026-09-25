@@ -94,13 +94,14 @@ class Harvester:
             if display.status != "visible":
                 return DownloadResult(
                     doi=doi, success=False, status=display.status,
-                    article_dir=article_dir, reason=display.status,
+                    article_dir=article_dir,
+                    reason=f"{display.status}:{display.event}",
                     outcome=("auth_required" if display.status in {
                         "challenge_required", "authentication_required"
                     } else "blocked"),
                     attempts=[Attempt(
                         source="browser_display", url=display.url, success=False,
-                        reason=display.status, stage="browser_display",
+                        reason=f"{display.status}:{display.event}", stage="browser_display",
                     )],
                 )
         pdf_path = article_dir / "article.pdf"

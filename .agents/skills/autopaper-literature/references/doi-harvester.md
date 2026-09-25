@@ -44,7 +44,7 @@
 
 ## 首次下载
 
-下载默认使用 `--browser-display foreground`：每篇在缓存、HTTP/API 和 SI 请求前打开出版社页面，并确认浏览器窗口处于 Windows 前台。普通页面显示可收起的任务状态；验证或登录页保持原貌。页面无法显示或置前时保存检查点并暂停队列，不得继续静默处理。只有用户明确允许无界面下载时使用 `--browser-display off`；旧 `--headless` 默认对应 off，不能与显式 foreground 同时使用。`--detach` 不改变浏览器展示要求。
+下载默认使用 `--browser-display foreground`：每篇在缓存、HTTP/API 和 SI 请求前，使用固定浏览器工作标签打开并核对对应 DOI 的出版社论文页面。参数名为兼容旧接口而保留；Windows 前台焦点、标签可见性和状态条注入失败不阻断已核对的页面。验证或登录页保持原貌。页面无法打开或 DOI 无法核对时保存检查点并暂停队列，不得继续静默处理。只有用户明确允许无界面下载时使用 `--browser-display off`；旧 `--headless` 默认对应 off，不能与显式 foreground 同时使用。`--detach` 不改变浏览器页面打开要求。
 
 批次含 Elsevier DOI 时，先检查一次全局配置：
 

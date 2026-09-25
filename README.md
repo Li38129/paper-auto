@@ -101,7 +101,7 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 
 可恢复任务（默认前台监督；显式增加 `--detach` 才转入后台）：
 
-下载默认使用 `--browser-display foreground`，每篇先打开出版社页面并确认窗口处于 Windows 前台，再进行缓存检查和正文/SI 请求。普通页面显示可收起的状态条；验证页保留原貌。页面无法显示时任务暂停并保留检查点。需要无界面运行时显式使用 `--browser-display off`，或沿用 `--headless`；`--headless` 与显式 foreground 冲突。MCP `download` 使用同名 `browser_display` 参数。
+下载默认使用 `--browser-display foreground`，每篇先在固定浏览器工作标签打开并核对对应 DOI 的出版社论文页面，再进行缓存检查和正文/SI 请求。参数名保留兼容；Windows 前台焦点、标签可见性或状态条注入失败不阻断已核对的页面。验证页保留原貌；页面无法打开或 DOI 无法核对时暂停并保留检查点。需要无界面运行时显式使用 `--browser-display off`，或沿用 `--headless`；`--headless` 与显式 foreground 冲突。MCP `download` 使用同名 `browser_display` 参数。
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `

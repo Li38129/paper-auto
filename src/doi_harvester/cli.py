@@ -87,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--headless", action="store_true", help="以无界面模式运行浏览器兜底。")
     download.add_argument(
         "--browser-display", choices=["foreground", "off"],
-        help="每篇下载前显示出版社前台页面；默认 foreground，--headless 默认 off。",
+        help="每篇下载前打开并核对出版社论文页面；默认 foreground，--headless 默认 off。",
     )
     download.add_argument(
         "--interactive-wait",

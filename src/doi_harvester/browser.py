@@ -30,7 +30,9 @@ CHALLENGE_MARKERS = (
     "正在进行安全验证",
     "安全验证",
 )
-LOGIN_URL_MARKERS = ("login", "signin", "sso", "shibboleth", "authorize")
+LOGIN_PATH_PATTERN = re.compile(
+    r"(?:^|/)(?:login|signin|sign-in|sso|shibboleth|authorize)(?:[./_-]|$)"
+)
 SUBSCRIPTION_MARKERS = (
     "available to purchase",
     "pay-per-view",
@@ -163,7 +165,8 @@ def classify_page(page: object) -> str:
     title, body_text, url = _page_signals(page)
     if any(marker in title or marker in body_text for marker in CHALLENGE_MARKERS):
         return "challenge_required"
-    if any(marker in url for marker in LOGIN_URL_MARKERS):
+    path = urlsplit(url).path.casefold()
+    if LOGIN_PATH_PATTERN.search(path):
         return "authentication_required"
     if any(marker in body_text for marker in SUBSCRIPTION_MARKERS):
         return "subscription_required"
@@ -612,6 +615,7 @@ class BrowserAuthorizer:
         command = [
             str(executable),
             f"--remote-debugging-port={port}",
+            "--remote-allow-origins=*",
             f"--user-data-dir={self.profile_dir.resolve()}",
             "--no-first-run",
             "--no-default-browser-check",

@@ -1,17 +1,15 @@
-"""为下载任务显示并核验可见的出版社工作页面。"""
+"""为下载任务打开并核验出版社工作页面。"""
 
 from __future__ import annotations
 
-import ctypes
 import json
-import platform
-import subprocess
 from contextlib import suppress
-from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .browser import BrowserAuthorizer, _read_cdp_endpoint, classify_page
+from .doi import InvalidDoiError, normalize_doi
 
 
 @dataclass(frozen=True)
@@ -21,80 +19,30 @@ class DisplayResult:
     event: str
 
 
-def _foreground_window(pid: int) -> bool:
-    """恢复浏览器窗口并验证当前前台窗口属于该进程。"""
-    if platform.system() != "Windows" or not pid:
-        return False
-    user32 = ctypes.windll.user32
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    user32.BringWindowToTop.argtypes = [wintypes.HWND]
-    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    user32.GetForegroundWindow.restype = wintypes.HWND
-    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-    handles: list[int] = []
-    enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+class _CDPConnectionError(Exception):
+    """标记调试连接失败，供外层退出 Playwright 后重连。"""
 
-    def collect(hwnd: int, _data: int) -> bool:
-        owner = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
-        if owner.value == pid and user32.IsWindowVisible(hwnd):
-            handles.append(hwnd)
+
+def _page_matches_doi(page: object, doi: str) -> bool:
+    """核对工作标签 URL 或论文元数据中的 DOI。"""
+    if doi in unquote(urlsplit(str(page.url)).path).casefold():
         return True
-
-    callback = enum_proc(collect)
-    user32.EnumWindows(callback, 0)
-    for hwnd in handles:
-        user32.ShowWindow(hwnd, 9)
-        user32.BringWindowToTop(hwnd)
-        user32.SetForegroundWindow(hwnd)
-        if user32.GetForegroundWindow() == hwnd:
-            return True
-        foreground = user32.GetForegroundWindow()
-        foreground_thread = user32.GetWindowThreadProcessId(foreground, None)
-        own_thread = ctypes.windll.kernel32.GetCurrentThreadId()
-        if foreground_thread and user32.AttachThreadInput(own_thread, foreground_thread, True):
-            try:
-                user32.BringWindowToTop(hwnd)
-                user32.SetForegroundWindow(hwnd)
-            finally:
-                user32.AttachThreadInput(own_thread, foreground_thread, False)
-        if user32.GetForegroundWindow() == hwnd:
-            return True
+    values = page.evaluate(
+        """() => Array.from(document.querySelectorAll(
+          'meta[name="citation_doi"], meta[name="dc.identifier"], '
+          + 'meta[name="DC.Identifier"], meta[name="prism.doi"], '
+          + 'meta[name="doi"], meta[property="og:doi"], '
+          + 'meta[name="citation_id"], link[rel="canonical"], [itemprop="doi"]'
+        )).map(node => node.content || node.href || node.textContent || '')"""
+    )
+    for value in values or []:
+        try:
+            if normalize_doi(str(value)) == doi:
+                return True
+        except InvalidDoiError:
+            if doi in unquote(str(value)).casefold():
+                return True
     return False
-
-
-def _browser_pid(profile_dir: Path) -> int:
-    try:
-        state = json.loads((profile_dir / "auth-state.json").read_text(encoding="utf-8"))
-        return int(state.get("browser_pid") or 0)
-    except (OSError, ValueError, TypeError):
-        return 0
-
-
-def _pid_for_cdp_port(endpoint: str) -> int:
-    """Edge 首次启动会重建主进程，按调试端口寻找实际窗口进程。"""
-    if platform.system() != "Windows":
-        return 0
-    try:
-        port = int(endpoint.rsplit(":", 1)[1])
-        script = (
-            "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" "
-            f"| Where-Object {{ $_.CommandLine -like '*--remote-debugging-port={port}*' "
-            "-and $_.CommandLine -notlike '*--type=*' } "
-            "| Select-Object -ExpandProperty ProcessId -First 1"
-        )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        return int(result.stdout.strip() or 0)
-    except (ValueError, OSError, subprocess.TimeoutExpired):
-        return 0
 
 
 def work_page(context: object, profile_dir: Path | None = None) -> object:
@@ -141,7 +89,9 @@ class VisibleBrowser:
         self.profile_dir = Path(profile_dir)
         self.channel = channel
 
-    def show(self, *, doi: str, rank: int | None, mode: str) -> DisplayResult:
+    def show(
+        self, *, doi: str, rank: int | None, mode: str, _reconnect_attempted: bool = False
+    ) -> DisplayResult:
         """每篇先打开页面；失败时调用方必须暂停队列。"""
         target = f"https://doi.org/{doi}"
         endpoint = _read_cdp_endpoint(self.profile_dir)
@@ -158,54 +108,78 @@ class VisibleBrowser:
                     "browser_display_unavailable", started.final_url or target, started.status
                 )
         try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as playwright:
                 try:
                     browser = playwright.chromium.connect_over_cdp(endpoint, timeout=10000)
-                except Exception:
-                    restarted = BrowserAuthorizer(
-                        profile_dir=self.profile_dir, channel=self.channel, cdp=True
-                    ).authorize(publisher="download", doi=doi, timeout_seconds=0)
-                    endpoint = restarted.cdp_endpoint
-                    opened_url = restarted.final_url
-                    browser = playwright.chromium.connect_over_cdp(endpoint, timeout=10000)
-                    events.append("browser_reconnected")
+                except Exception as exc:
+                    raise _CDPConnectionError(str(exc)) from exc
                 context = browser.contexts[0]
                 page = work_page(context, self.profile_dir)
                 if not opened_url or page.url != opened_url:
-                    page.goto(target, wait_until="domcontentloaded", timeout=60000)
+                    try:
+                        page.goto(target, wait_until="domcontentloaded", timeout=60000)
+                    except PlaywrightTimeoutError:
+                        events.append("publisher_navigation_timeout")
+                if page.url.startswith("https://doi.org/"):
+                    with suppress(PlaywrightTimeoutError):
+                        page.wait_for_url(
+                            lambda url: not url.startswith("https://doi.org/"),
+                            timeout=20000,
+                        )
+                with suppress(PlaywrightTimeoutError):
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
                 page.wait_for_timeout(1500)
                 events.append("publisher_navigated")
                 if page.url.startswith("https://doi.org/"):
                     return DisplayResult(
                         "browser_publisher_unavailable", page.url, "publisher_navigation_failed"
                     )
-                page.bring_to_front()
-                session = context.new_cdp_session(page)
-                window = session.send("Browser.getWindowForTarget")
-                session.send(
-                    "Browser.setWindowBounds",
-                    {"windowId": window["windowId"], "bounds": {"windowState": "normal"}},
-                )
-                if not (
-                    _foreground_window(_browser_pid(self.profile_dir))
-                    or _foreground_window(_pid_for_cdp_port(endpoint))
-                ):
-                    return DisplayResult("browser_not_foreground", page.url, "foreground_failed")
-                if not page.evaluate("() => document.visibilityState === 'visible'"):
-                    return DisplayResult("browser_not_visible", page.url, "visibility_failed")
                 status = classify_page(page)
                 if status in {"challenge_required", "authentication_required"}:
                     return DisplayResult(status, page.url, "authorization_required")
-                if not self.update(
-                    doi=doi, rank=rank, mode=mode, stage="页面已显示", page=page
-                ):
+                if not _page_matches_doi(page, doi):
                     return DisplayResult(
-                        "browser_status_unavailable", page.url, "status_panel_failed"
+                        "browser_publisher_unavailable", page.url, "doi_not_confirmed"
                     )
-                events.append("foreground_confirmed")
+                # 工作标签尽量显示给用户，但系统焦点和窗口状态不阻断已核对的页面。
+                with suppress(Exception):
+                    page.bring_to_front()
+                    session = context.new_cdp_session(page)
+                    window = session.send("Browser.getWindowForTarget")
+                    session.send(
+                        "Browser.setWindowBounds",
+                        {"windowId": window["windowId"], "bounds": {"windowState": "normal"}},
+                    )
+                if not self.update(
+                    doi=doi, rank=rank, mode=mode, stage="页面已打开", page=page
+                ):
+                    events.append("status_panel_unavailable")
+                events.append("article_page_opened")
                 return DisplayResult("visible", page.url, ";".join(events))
+        except _CDPConnectionError as exc:
+            if _reconnect_attempted:
+                return DisplayResult(
+                    "browser_display_unavailable", target, f"cdp_reconnect_failed:{exc}"
+                )
+            # 退出旧 Playwright 上下文后再启动授权器，避免同步 API 嵌套。
+            restarted = BrowserAuthorizer(
+                profile_dir=self.profile_dir, channel=self.channel, cdp=True
+            ).authorize(publisher="download", doi=doi, timeout_seconds=0)
+            if not restarted.cdp_endpoint:
+                return DisplayResult(
+                    "browser_display_unavailable", restarted.final_url or target, restarted.status
+                )
+            result = self.show(
+                doi=doi, rank=rank, mode=mode, _reconnect_attempted=True
+            )
+            if result.status == "visible":
+                return DisplayResult(
+                    result.status, result.url, f"browser_reconnected;{result.event}"
+                )
+            return result
         except Exception as exc:
             return DisplayResult(
                 "browser_display_unavailable", target, f"{type(exc).__name__}:{exc}"
