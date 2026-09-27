@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from .browser import BrowserAuthorizer, _read_cdp_endpoint, classify_page
+from .browser import (
+    BrowserAuthorizer,
+    _read_cdp_endpoint,
+    classify_page,
+    require_edge_browser,
+    wait_for_verification,
+)
 from .doi import InvalidDoiError, normalize_doi
 
 
@@ -107,28 +113,31 @@ def work_page(context: object, profile_dir: Path | None = None) -> object:
 class VisibleBrowser:
     def __init__(self, *, profile_dir: Path, channel: str | None = None) -> None:
         self.profile_dir = Path(profile_dir)
-        self.channel = channel
+        self.channel = channel or "msedge"
 
     def show(
         self, *, doi: str, rank: int | None, mode: str, _reconnect_attempted: bool = False
     ) -> DisplayResult:
         """每篇先打开页面；失败时调用方必须暂停队列。"""
         target = f"https://doi.org/{doi}"
+        if self.channel != "msedge":
+            return DisplayResult(
+                "browser_display_unavailable",
+                target,
+                "explicit_non_edge_channel:请确认改用外部 Edge",
+            )
         endpoint = _read_cdp_endpoint(self.profile_dir)
         events = ["browser_connected"] if endpoint else ["browser_started"]
-        opened_url = ""
         if not endpoint:
             started = BrowserAuthorizer(
-                profile_dir=self.profile_dir, channel=self.channel, cdp=True
+                profile_dir=self.profile_dir, channel="msedge", cdp=True
             ).authorize(publisher="download", doi=doi, timeout_seconds=0)
             endpoint = started.cdp_endpoint or _read_cdp_endpoint(self.profile_dir)
-            opened_url = started.final_url
             if not endpoint:
                 return DisplayResult(
                     "browser_display_unavailable", started.final_url or target, started.status
                 )
         try:
-            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as playwright:
@@ -136,54 +145,58 @@ class VisibleBrowser:
                     browser = playwright.chromium.connect_over_cdp(endpoint, timeout=10000)
                 except Exception as exc:
                     raise _CDPConnectionError(str(exc)) from exc
+                require_edge_browser(browser)
                 context = browser.contexts[0]
                 page = work_page(context, self.profile_dir)
-                if not opened_url or page.url != opened_url:
-                    try:
-                        page.goto(target, wait_until="domcontentloaded", timeout=60000)
-                    except PlaywrightTimeoutError:
-                        events.append("publisher_navigation_timeout")
-                if page.url.startswith("https://doi.org/"):
-                    with suppress(PlaywrightTimeoutError):
-                        page.wait_for_url(
-                            lambda url: not url.startswith("https://doi.org/"),
-                            timeout=20000,
-                        )
+                session = context.new_cdp_session(page)
+                try:
+                    target_id = session.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+                finally:
+                    session.detach()
+                # 本次请求与真实标签绑定；加载错误不阻断缓存和独立传输路径。
+                record = {
+                    "target_id": target_id,
+                    "endpoint": endpoint,
+                    "doi": doi,
+                    "target_url": target,
+                    "navigation_result": "requested",
+                }
+                self.profile_dir.mkdir(parents=True, exist_ok=True)
+                marker = self.profile_dir / "work-target.json"
+                marker.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+                try:
+                    page.goto(target, wait_until="commit", timeout=10000)
+                    record["navigation_result"] = "committed"
+                except Exception as exc:
+                    record["navigation_result"] = f"navigation_error:{type(exc).__name__}:{exc}"
+                    events.append("publisher_navigation_failed")
+                if page.is_closed():
+                    return DisplayResult("browser_display_unavailable", target, "work_tab_closed")
                 if page.url.startswith("https://doi.org/") and doi.startswith("10.1021/"):
-                    # ACS 页面可由 DOI 直达；解析器失败时改用出版社入口继续核验。
-                    acs_url = f"https://pubs.acs.org/doi/{doi}"
-                    try:
-                        page.goto(acs_url, wait_until="domcontentloaded", timeout=60000)
-                    except PlaywrightTimeoutError:
-                        events.append("acs_direct_navigation_timeout")
-                    with suppress(PlaywrightTimeoutError):
-                        page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    events.append("acs_direct_fallback")
-                with suppress(PlaywrightTimeoutError):
-                    page.wait_for_load_state("domcontentloaded", timeout=10000)
-                page.wait_for_timeout(1500)
-                events.append("publisher_navigated")
-                if page.url.startswith("https://doi.org/"):
-                    return DisplayResult(
-                        "browser_publisher_unavailable", page.url, "publisher_navigation_failed"
-                    )
-                status = classify_page(page)
-                if status in {"challenge_required", "authentication_required"}:
-                    return DisplayResult(status, page.url, "authorization_required")
-                if not _page_matches_doi(page, doi):
-                    return DisplayResult(
-                        "browser_publisher_unavailable", page.url, "doi_not_confirmed"
-                    )
-                # 工作标签尽量显示给用户，但系统焦点和窗口状态不阻断已核对的页面。
+                    with suppress(Exception):
+                        page.goto(
+                            f"https://pubs.acs.org/doi/{doi}", wait_until="commit", timeout=10000
+                        )
+                        events.append("acs_direct_fallback")
+                record["current_url"] = page.url
+                marker.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
                 with suppress(Exception):
-                    page.bring_to_front()
-                    session = context.new_cdp_session(page)
-                    window = session.send("Browser.getWindowForTarget")
-                    session.send(
-                        "Browser.setWindowBounds",
-                        {"windowId": window["windowId"], "bounds": {"windowState": "normal"}},
-                    )
-                if not self.update(doi=doi, rank=rank, mode=mode, stage="页面已打开", page=page):
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
+                status = wait_for_verification(page, initial_status=classify_page(page))
+                if page.is_closed():
+                    return DisplayResult("browser_display_unavailable", target, "work_tab_closed")
+                if status in {"challenge_required", "authentication_required"}:
+                    return DisplayResult(status, page.url, "authorization_required_after_10s")
+                verified = False
+                if not page.url.startswith("https://doi.org/"):
+                    with suppress(Exception):
+                        verified = _page_matches_doi(page, doi)
+                events.append(
+                    "article_content_verified" if verified else "article_content_unconfirmed"
+                )
+                if not self.update(
+                    doi=doi, rank=rank, mode=mode, stage="Edge 标签已打开", page=page
+                ):
                     events.append("status_panel_unavailable")
                 events.append("article_page_opened")
                 return DisplayResult("visible", page.url, ";".join(events))

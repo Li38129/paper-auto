@@ -2,11 +2,18 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from doi_harvester import cli, mcp_server
 from doi_harvester.job_store import _item_status
 from doi_harvester.models import DownloadResult
 from doi_harvester.pipeline import Harvester
 from doi_harvester.visible_browser import DisplayResult
+
+
+@pytest.fixture(autouse=True)
+def external_edge_session(monkeypatch):
+    monkeypatch.setattr("doi_harvester.visible_browser.require_edge_browser", lambda _: None)
 
 
 def test_arxiv_doi_matches_its_abs_page_even_when_metadata_points_to_version_of_record() -> None:
@@ -52,9 +59,15 @@ def test_stale_cdp_restarts_after_old_playwright_closes(monkeypatch, tmp_path: P
 
     class Session:
         def send(self, command: str, *_args):
-            return {"windowId": 1} if command == "Browser.getWindowForTarget" else {}
+            return {"targetInfo": {"targetId": "work"}}
+
+        def detach(self):
+            pass
 
     class Page:
+        def is_closed(self):
+            return False
+
         url = "https://publisher.test/article/10.1000/example"
 
         def goto(self, *_args, **_kwargs):
@@ -146,6 +159,9 @@ def test_article_page_opens_when_window_focus_and_status_panel_fail(
     from doi_harvester.visible_browser import VisibleBrowser
 
     class Page:
+        def is_closed(self):
+            return False
+
         url = "https://publisher.test/article/10.1000/example"
 
         def goto(self, *_args, **_kwargs):
@@ -164,7 +180,12 @@ def test_article_page_opens_when_window_focus_and_status_panel_fail(
             raise RuntimeError("Windows 拒绝置前")
 
     page = Page()
-    context = SimpleNamespace(pages=[page])
+    context = SimpleNamespace(
+        pages=[page],
+        new_cdp_session=lambda _: SimpleNamespace(
+            send=lambda _: {"targetInfo": {"targetId": "work"}}, detach=lambda: None
+        ),
+    )
     playwright = SimpleNamespace(
         chromium=SimpleNamespace(
             connect_over_cdp=lambda *_args, **_kwargs: SimpleNamespace(contexts=[context])
@@ -204,6 +225,9 @@ def test_acs_direct_fallback_when_doi_resolver_stays_on_doi_org(
     from doi_harvester.visible_browser import VisibleBrowser
 
     class Page:
+        def is_closed(self):
+            return False
+
         url = "about:blank"
 
         def goto(self, url: str, **_kwargs):
@@ -229,7 +253,10 @@ def test_acs_direct_fallback_when_doi_resolver_stays_on_doi_org(
 
     class Session:
         def send(self, command: str, *_args):
-            return {"windowId": 1} if command == "Browser.getWindowForTarget" else {}
+            return {"targetInfo": {"targetId": "work"}}
+
+        def detach(self):
+            pass
 
     page = Page()
     context = SimpleNamespace(pages=[page], new_cdp_session=lambda _page: Session())
@@ -287,6 +314,9 @@ def test_work_page_reuses_saved_target_across_origins(tmp_path: Path) -> None:
     from doi_harvester.visible_browser import work_page
 
     class Page:
+        def is_closed(self):
+            return False
+
         def __init__(self, target: str) -> None:
             self.target = target
 

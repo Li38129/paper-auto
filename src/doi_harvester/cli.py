@@ -83,20 +83,20 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--browser-channel",
         default=None,
-        help="Playwright 浏览器通道；Windows 自动选择 Edge 或 Chrome。",
+        help="浏览器通道；正常下载使用外部 msedge，不自动回退 Chrome。",
     )
     download.add_argument("--profile-dir", type=Path, help="持久化浏览器配置目录。")
     download.add_argument("--headless", action="store_true", help="以无界面模式运行浏览器兜底。")
     download.add_argument(
         "--browser-display",
         choices=["foreground", "off"],
-        help="每篇下载前打开并核对出版社论文页面；默认 foreground，--headless 默认 off。",
+        help="每篇先打开外部 Edge DOI 标签；无需焦点或加载成功；默认 foreground。",
     )
     download.add_argument(
         "--interactive-wait",
         type=float,
         default=0.0,
-        help="兼容参数；大于零时等价于 pause 策略并覆盖挑战等待秒数。",
+        help="兼容参数；下载验证仍最多缓冲10秒，不改变已选择的策略。",
     )
     download.add_argument(
         "--challenge-policy",
@@ -107,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--challenge-timeout",
         type=float,
         default=600.0,
-        help="pause 策略等待用户完成验证或登录的最长秒数。",
+        help="兼容参数：下载验证统一缓冲10秒，之后按 pause/skip 处理。",
     )
     download.add_argument("--delay", type=float, default=1.5, help="不同 DOI 之间的等待秒数。")
     download.add_argument("--verbose", action="store_true", help="输出调试日志。")

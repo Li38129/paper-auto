@@ -263,6 +263,30 @@ def wait_for_authorization(
         page.wait_for_timeout(max(poll_ms, 1))
 
 
+def wait_for_verification(page: object, *, initial_status: str | None = None) -> str:
+    """下载遇独立验证时最多缓冲十秒，验证消失即继续。"""
+    status = initial_status or classify_page(page)
+    deadline = time.monotonic() + 10.0
+    while status in {"challenge_required", "authentication_required"}:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        page.wait_for_timeout(min(1000, max(1, int(remaining * 1000))))
+        status = classify_page(page)
+    return status
+
+
+def require_edge_browser(browser: object) -> None:
+    """读取浏览器级调试信息，拒绝把 Chrome 会话当作 Edge。"""
+    session = browser.new_browser_cdp_session()
+    try:
+        version = session.send("Browser.getVersion")
+        if "Edg/" not in str(version.get("userAgent") or ""):
+            raise RuntimeError("当前调试会话不是外部 Edge，请使用专用 Edge 配置重新连接。")
+    finally:
+        session.detach()
+
+
 def browser_executable_path(channel: str | None) -> Path | None:
     """根据浏览器通道定位本机 Chrome/Edge 可执行文件。"""
     resolved_channel = channel or BrowserPdfDownloader._default_channel()
@@ -465,11 +489,15 @@ class BrowserAuthorizer:
                 try:
                     page = _content_page_or_new(context)
                     page.set_default_timeout(self.navigation_timeout_ms)
-                    page.goto(
-                        target_url,
-                        wait_until="domcontentloaded",
-                        timeout=self.navigation_timeout_ms,
-                    )
+                    try:
+                        page.goto(
+                            target_url,
+                            wait_until="domcontentloaded",
+                            timeout=self.navigation_timeout_ms,
+                        )
+                    except Exception:
+                        if publisher != "download":
+                            raise
                     LOGGER.warning(
                         "请在打开的浏览器中完成站点安全验证和机构登录；程序会自动检测结果。"
                     )
@@ -543,19 +571,30 @@ class BrowserAuthorizer:
                         existing_endpoint,
                         timeout=self.navigation_timeout_ms,
                     )
+                    if publisher == "download" and self.channel == "msedge":
+                        require_edge_browser(browser)
                     if browser.contexts:
                         context = browser.contexts[0]
                         from .visible_browser import work_page
+
                         page = work_page(context, self.profile_dir)
                         page.set_default_timeout(self.navigation_timeout_ms)
-                        page.goto(
-                            target_url,
-                            wait_until="domcontentloaded",
-                            timeout=self.navigation_timeout_ms,
-                        )
+                        try:
+                            page.goto(
+                                target_url,
+                                wait_until="domcontentloaded",
+                                timeout=self.navigation_timeout_ms,
+                            )
+                        except Exception:
+                            if publisher != "download":
+                                raise
                         initial_status = classify_page(page)
                         started = time.monotonic()
-                        status = wait_for_authorization(page, timeout_seconds=timeout_seconds)
+                        status = (
+                            initial_status
+                            if publisher == "download"
+                            else wait_for_authorization(page, timeout_seconds=timeout_seconds)
+                        )
                         challenge_status, institution_status, article_status = split_access_state(
                             status
                         )
@@ -649,8 +688,11 @@ class BrowserAuthorizer:
                     raise RuntimeError("无法连接普通 Chrome 的本地调试端口")
                 if not browser.contexts:
                     raise RuntimeError("普通 Chrome 未提供默认浏览器上下文")
+                if publisher == "download" and self.channel == "msedge":
+                    require_edge_browser(browser)
                 context = browser.contexts[0]
                 from .visible_browser import work_page
+
                 page = work_page(context, self.profile_dir)
                 page.set_default_timeout(self.navigation_timeout_ms)
                 if page.url in {"", "about:blank", "chrome://newtab/"}:
@@ -679,9 +721,10 @@ class BrowserAuthorizer:
                 )
                 initial_status = classify_page(page)
                 started = time.monotonic()
-                status = wait_for_authorization(
-                    page,
-                    timeout_seconds=timeout_seconds,
+                status = (
+                    initial_status
+                    if publisher == "download"
+                    else wait_for_authorization(page, timeout_seconds=timeout_seconds)
                 )
                 challenge_status, institution_status, article_status = split_access_state(status)
                 result = AuthorizationResult(
@@ -786,11 +829,7 @@ class BrowserPdfDownloader:
         doi_url = f"https://doi.org/{doi}"
 
         try:
-            if (
-                self.keep_browser_open
-                and not self.headless
-                and self.challenge_policy == "pause"
-            ):
+            if self.keep_browser_open and not self.headless and self.challenge_policy == "pause":
                 # 普通 CDP 浏览器由独立进程持有，当前下载结束或等待超时后仍保持页面。
                 bootstrap = BrowserAuthorizer(
                     profile_dir=self.profile_dir,
@@ -820,6 +859,8 @@ class BrowserPdfDownloader:
                             cdp_endpoint,
                             timeout=self.timeout_ms,
                         )
+                        if self.channel == "msedge" and not self.headless:
+                            require_edge_browser(browser)
                         if browser.contexts:
                             context = browser.contexts[0]
                             result = self._download_in_context(
@@ -838,6 +879,13 @@ class BrowserPdfDownloader:
                             )
                             return result
                     except Exception as exc:  # noqa: BLE001
+                        if self.channel == "msedge" and not self.headless:
+                            return Attempt(
+                                source="browser",
+                                url=doi_url,
+                                success=False,
+                                reason=f"browser_display_unavailable:{exc}",
+                            )
                         LOGGER.warning("现有 CDP 浏览器不可用，改用持久化启动：%s", exc)
 
                 profile_lock = ProfileLock(self.profile_dir)
@@ -901,26 +949,13 @@ class BrowserPdfDownloader:
         doi_url = f"https://doi.org/{doi}"
         # 复用同一网页标签，避免批量下载时不断抢占前台并积累验证页。
         from .visible_browser import work_page
+
         page = work_page(context, self.profile_dir)
         page.set_default_timeout(self.timeout_ms)
         page.goto(doi_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
         page.wait_for_timeout(3000)
 
-        page_status = classify_page(page)
-        if (
-            page_status in {"challenge_required", "authentication_required"}
-            and not self.headless
-            and self.challenge_policy == "pause"
-            and self.challenge_timeout_seconds
-        ):
-            LOGGER.warning(
-                "浏览器正在等待用户完成站点验证/登录（最多 %.0f 秒）。",
-                self.challenge_timeout_seconds,
-            )
-            page_status = wait_for_authorization(
-                page,
-                timeout_seconds=self.challenge_timeout_seconds,
-            )
+        page_status = wait_for_verification(page)
         if page_status in {"challenge_required", "authentication_required"}:
             return Attempt(
                 source="browser",
@@ -930,6 +965,16 @@ class BrowserPdfDownloader:
                 final_url=page.url,
             )
 
+        from .visible_browser import _page_matches_doi
+
+        if not _page_matches_doi(page, doi):
+            return Attempt(
+                source="browser",
+                url=doi_url,
+                success=False,
+                reason="no_pdf_unconfirmed_article",
+                final_url=page.url,
+            )
         urls = self._collect_urls(page=page, candidate_urls=candidate_urls)
         for url in urls:
             response = context.request.get(
@@ -941,6 +986,29 @@ class BrowserPdfDownloader:
                 timeout=self.timeout_ms,
                 fail_on_status_code=False,
             )
+            if response.status in {401, 403, 429}:
+                status = wait_for_verification(page)
+                if status not in {
+                    "challenge_required",
+                    "authentication_required",
+                } and _page_matches_doi(page, doi):
+                    response = context.request.get(
+                        url,
+                        headers={"Referer": page.url},
+                        timeout=self.timeout_ms,
+                        fail_on_status_code=False,
+                    )
+                if response.status in {401, 403, 429}:
+                    return Attempt(
+                        source="browser",
+                        url=url,
+                        success=False,
+                        reason="authentication_required"
+                        if response.status == 401
+                        else "challenge_required",
+                        final_url=page.url,
+                        status_code=response.status,
+                    )
             body = response.body()
             if response.ok and b"%PDF-" in body[:1024] and len(body) >= 1024:
                 temporary.write_bytes(body)
@@ -989,7 +1057,7 @@ class BrowserPdfDownloader:
         if surface_result is not None:
             return surface_result
 
-        final_status = classify_page(page)
+        final_status = wait_for_verification(page)
         reason = (
             final_status
             if final_status
@@ -1132,15 +1200,4 @@ class BrowserPdfDownloader:
     def _default_channel() -> str | None:
         if platform.system() != "Windows":
             return None
-        edge_paths = (
-            Path(os.getenv("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
-            Path(os.getenv("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
-            Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
-        )
-        if any(path.is_file() for path in edge_paths):
-            return "msedge"
-        chrome_paths = (
-            Path(os.getenv("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
-            Path(os.getenv("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
-        )
-        return "chrome" if any(path.is_file() for path in chrome_paths) else None
+        return "msedge"

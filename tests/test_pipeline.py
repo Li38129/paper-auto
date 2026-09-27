@@ -391,3 +391,27 @@ def test_body_authorization_gate_does_not_start_supplement_request(monkeypatch, 
     )
     worker._add_supplements(result)
     assert result.supplement_status == "not_requested"
+
+
+def test_opened_edge_with_unconfirmed_content_does_not_block_body_cache(tmp_path):
+    from types import SimpleNamespace
+
+    from doi_harvester.doi import doi_slug
+    from doi_harvester.visible_browser import DisplayResult
+
+    doi = "10.1000/example"
+    folder = tmp_path / doi_slug(doi)
+    folder.mkdir()
+    pdf = folder / "article.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
+    worker = Harvester(output_dir=tmp_path, browser_display="foreground")
+    worker.visible_browser = SimpleNamespace(
+        show=lambda **_: DisplayResult(
+            "visible", "edge-error://edgewebdata/", "article_content_unconfirmed"
+        ),
+        update=lambda **_: True,
+    )
+    result = worker.download(doi)
+    assert result.success and result.status == "cached"
+    assert result.pdf_path == pdf
+    assert worker.browser_options["channel"] == "msedge"

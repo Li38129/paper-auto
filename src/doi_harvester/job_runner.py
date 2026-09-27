@@ -249,6 +249,10 @@ def run_job(
             "keep_browser_open": bool(options.get("keep_browser_open", True)),
         }
     )
+    if (
+        options.get("browser_display") or ("off" if options.get("headless") else "foreground")
+    ) == "foreground":
+        browser_options.setdefault("channel", "msedge")
     worker = harvester or Harvester(
         output_dir=Path(str(job["output_dir"])),
         browser_fallback=bool(job["browser_fallback"]),

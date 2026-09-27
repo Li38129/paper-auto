@@ -34,7 +34,7 @@ cd paper-auto
 .\scripts\doi-harvester.ps1 --help
 ```
 
-首次运行会自动安装所需依赖。Windows 会优先选择已安装的 Edge，其次 Chrome。
+首次运行会自动安装所需依赖。Windows 正常下载默认使用外部 Edge，不静默回退 Chrome。
 若两者都不存在，需要按 Playwright 官方方式安装 Chromium。
 
 运行测试和静态检查：
@@ -101,7 +101,7 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 
 可恢复任务（默认前台监督；显式增加 `--detach` 才转入后台）：
 
-下载默认使用 `--browser-display foreground`，每篇先在固定浏览器工作标签打开并核对对应 DOI 的出版社论文页面，再进行缓存检查和正文/SI 请求。参数名保留兼容；Windows 前台焦点、标签可见性或状态条注入失败不阻断已核对的页面。验证页保留原貌；页面无法打开或 DOI 无法核对时暂停并保留检查点。需要无界面运行时显式使用 `--browser-display off`，或沿用 `--headless`；`--headless` 与显式 foreground 冲突。MCP `download` 使用同名 `browser_display` 参数。
+下载默认使用 `--browser-display foreground`，每篇先在外部 Edge 专用工作标签请求对应 DOI。无需焦点或出版社加载成功，导航记录与真实标签绑定即可继续缓存/HTTP/API；浏览器提取链接仍须完整核验内容 DOI。验证先最多缓冲10秒，再按 pause/skip 处理。页面关闭或 Edge 不可用时暂停。显式 off/headless 保留高级兼容。
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
@@ -193,7 +193,7 @@ ACS、Elsevier 或 RSC 等需要已有订阅会话的出版社：
 Elsevier、RSC 或 Wiley 可把 `--publisher acs` 分别替换为 `--publisher elsevier`、
 `--publisher rsc` 或 `--publisher wiley`；Wiley 授权需同时传入 `--doi`。前台可见下载遇到
 `challenge_required` 或 `authentication_required` 时默认暂停最多 600 秒，不再切换到下一篇；
-`--challenge-policy skip` 可使用跳过行为，`fail-fast` 会停止后续 DOI。无头模式默认不等待；可见浏览器即使在显式后台模式下也会保留验证策略和等待时间。等待超时后任务停在 `waiting_for_user`，普通 Chrome/Edge 与当前页面继续保持打开，完成授权后用 `jobs resume <任务ID>` 恢复。
+`--challenge-policy skip` 在十秒缓冲后仍需验证时跳过当前篇，`pause` 保存检查点并进入 waiting_for_user，`fail-fast` 保留停止队列的兼容行为。后台和显式无头下载也沿用已选择策略；下载等待参数不延长十秒缓冲。正常任务保留外部 Edge 页面，授权完成后用 jobs resume 恢复。
 
 请在打开的可见 Chrome/Edge 中亲自完成安全验证和学校 SSO。程序会检测页面状态，只有 PDF 入口连续三次稳定出现才会确认 `ready`，不会再依赖固定等待时间。
 
@@ -314,3 +314,14 @@ SI 统一由 `HttpSupplementDownloader` 获取。浏览器发现附件链接后�
 通过 `autopaper-literature` 开始每个新下载目标时，即使请求已提供设置，也先在对话中确认：保存绝对路径、仅正文/仅 SI/正文加 SI、遇人工验证跳过/暂停。三项确认完成前不写 Excel、不建论文目录、不下载；同一目标内部子批次、验证后继续和断点恢复沿用原设置。CLI/MCP 不额外弹问，接收确认后的显式参数。
 
 CLI `--challenge-policy skip` 在确认的验证/登录页面结束当前篇处理，以 `auth_skipped` 保存原因、页面和已有文件，按原限速继续下一篇；`pause` 暂停为 `waiting_for_user`。MCP 增加 `challenge_policy` 参数，默认 pause，保留 fail-fast 兼容。skip 不覆盖浏览器连接及 DOI 核验错误，也不被等待时长选项改成 pause。跳过条目普通恢复不重新入队；任务 completed 表示队列处理完毕，报告仍须区分成功、人工验证跳过和其他失败。
+
+
+## Edge 标签、十秒验证缓冲与临时脚本
+
+正常下载使用外部 Edge（msedge）专用工作标签，核验 CDP 浏览器归属，不使用内置浏览器或静默回退 Chrome。旧任务未指定通道时使用 Edge，显式非 Edge 会提示而不替换会话。保留用户明确选择的 off/headless 高级接口。
+
+工作标签 ID、当前会话及本次 DOI 导航请求构成页面已打开的证据；无需焦点，导航超时、解析失败或出版社内容未加载仍允许缓存、HTTP/API 继续。浏览器内容提取须另行完整核验 DOI，不能使用旧论文链接，也不能把页面失败记成无 SI。Edge 未启动、标签关闭或无法连接仍暂停。
+
+每次独立验证码/登录页面每秒检查，最多10秒，提前恢复就继续。仍需人工验证则按 pause/skip 处理。下载的 --challenge-timeout/--interactive-wait 参数保留兼容，不再隐式延长等待；独立 auth 命令不变。
+
+临时代码放在 `temp/doi-harvester/task-scripts/<任务或目标ID>/`，附用途、输入输出、命令和恢复说明；调用 CLI/MCP 或公开接口，不直接写数据库，不把临时 DOI、路径或顺序硬编码进生产代码。详见 AGENTS.md；失败或未完成目录保留，临时脚本不提交 Git。

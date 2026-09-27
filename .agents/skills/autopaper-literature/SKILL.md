@@ -44,7 +44,7 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 ## 创建论文目录与按确认模式下载
 
-下载默认逐篇在浏览器工作标签打开并核对对应 DOI 的出版社论文页面；页面未打开或无法核对时保留任务并暂停，不能将其记为无补充材料。Windows 前台焦点不影响已打开页面的下载。
+下载默认逐篇打开外部 Edge 专用 DOI 工作标签，不使用内置浏览器。标签存在且有本次目标 DOI 的导航记录即可继续缓存、HTTP/API；无需焦点，出版社加载失败或内容暂缺不阻断独立传输。浏览器提取正文或 SI 链接仍须完整核验页面 DOI，不能将内容未确认记成无 SI。
 
 1. 只创建工作簿脚本在 `resolved-records.json` 中返回且尚不存在的目录。保留目标目录的全部既有内容，不覆盖、不删除、不移动。
 2. 创建或确认目录后，读取并严格执行 [DOI Harvester 联动规则](references/doi-harvester.md)。只执行此前三项确认所授权的下载模式，不把创建目录视为授权下载正文。
@@ -62,9 +62,18 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 正文、仅 SI、正文加 SI 均通过 CLI/MCP 自动创建可恢复任务。CLI 的单 DOI、DOI 列表与固定编号清单共用任务执行器；默认当前终端执行，`--detach` 仅切换 Broker。不得使用 `--overwrite`。每篇保存数据库检查点，默认每 100 篇同步报告、结果 CSV 与已配置的 Excel，并在暂停和结束时同步。未指定报告目录时使用 `temp/doi-harvester/jobs/<job_id>`；授权等待或中断后通过原 ID 恢复，不新建重复任务。
 
-SI 链接由浏览器发现后先尝试 HTTP 流式获取，失败附件再使用浏览器回退。逐次失败尝试不能覆盖最终成功结果；JSON 保留尝试过程，CSV/Excel 记录最终附件结果。页面 DOI 须完整匹配，不能依据子串复用页面；页面不可确认或验证失败保留未解决/授权状态。旧任务缺少 SI 参数时仍按正文模式恢复。有效缓存、编号和目录保持原有规则。
+SI 链接由浏览器发现后先尝试 HTTP 流式获取，失败附件再使用浏览器回退。逐次失败尝试不能覆盖最终成功结果；JSON 保留尝试过程，CSV/Excel 记录最终附件结果。浏览器提取链接时页面 DOI 须完整匹配，不能依据子串复用错误内容；展示标签已打开后可先尝试缓存/API。旧任务缺少 SI 参数时仍按正文模式恢复。有效缓存、编号和目录保持原有规则。
 
 
-CLI 始终显式传入确认的 `--output-dir`、下载模式和 `--challenge-policy pause|skip`；仅正文不传 SI 参数，正文加 SI 传 `--supplements`，仅 SI 传 `--supplements-only`。MCP 传对应 `output_dir`、`supplements`、`supplements_only`、`challenge_policy`。恢复读取原任务配置。
+CLI 始终显式传入确认的 `--output-dir`、下载模式、`--browser-channel msedge`、`--browser-display foreground` 和 `--challenge-policy pause|skip`；仅正文不传 SI 参数，正文加 SI 传 `--supplements`，仅 SI 传 `--supplements-only`。MCP 传对应 `output_dir`、`supplements`、`supplements_only`、`challenge_policy`。恢复读取原任务配置。
 
-人工验证选择 skip 时，该篇标记 `auth_skipped`，记录 DOI、页面、原因和已有文件后继续下一篇，不等待、不自动重试。选择 pause 时，保留页面及检查点，进入 `waiting_for_user`。浏览器连接或 DOI 核验错误仍暂停，不可用 skip 掩盖。报告须分别统计人工验证跳过数与成功数；队列执行完成不等于全部下载成功。跳过项保留恢复数据，普通恢复不重新入队。
+人工验证选择 skip 时，该篇标记 `auth_skipped`，记录 DOI、页面、原因和已有文件后继续下一篇，不等待、不自动重试。选择 pause 时，保留页面及检查点，进入 `waiting_for_user`。Edge 未安装、连接失败或标签关闭时暂停；页面内容未核验时不用于链接提取，但不阻断缓存/API。报告须分别统计人工验证跳过数与成功数；队列执行完成不等于全部下载成功。跳过项保留恢复数据，普通恢复不重新入队。
+
+
+## 验证缓冲与临时脚本
+
+每次独立验证码或登录页先每秒检查，最多缓冲10秒，验证提前消失立即继续，不要求已出现 PDF 按钮。同一次结果在层间传递不重复等待；再次出现独立验证可再次缓冲。10秒后仍需人工验证时按已确认 pause/skip 处理。下载的旧等待时长参数不延长此缓冲；独立 auth 命令保留人工授权等待。附件授权失败只有当前 Edge 页面确认恢复且 DOI 匹配后才重试该附件一次。
+
+CLI/MCP 正常下载默认外部 Edge，不静默回退 Chrome；旧任务显式指定非 Edge 时提示，不能默默替换会话。只有用户明确选择无界面运行时使用 off/headless 高级接口。工作标签导航记录绑定真实标签 ID 和当前调试会话，不能仅凭有 Edge 进程就认定目标论文已打开。
+
+临时追加少量 DOI、筛选重试条目、生成任务清单或一次性编排脚本放在 `temp/doi-harvester/task-scripts/<任务或目标ID>/`。附说明记录用途、任务ID、输入输出、命令和恢复方法，通过现有 CLI/MCP 或公开任务接口调用；禁止直接写数据库、改文献编号、覆盖有效文件、绕过三项确认，或将临时路径/DOI/顺序写入生产代码。现有接口不足时单独提出通用接口变更。目录已被 Git 忽略，失败或未完成时保留。本规则不创建真实追加或排序任务。

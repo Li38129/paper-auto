@@ -181,9 +181,16 @@ def _digest(path: Path) -> str:
 class HttpSupplementDownloader:
     """先使用普通 HTTP，再复用已有浏览器会话获取附件。"""
 
-    def __init__(self, *, profile_dir: Path | None = None, timeout_seconds: float = 45.0) -> None:
+    def __init__(
+        self,
+        *,
+        profile_dir: Path | None = None,
+        timeout_seconds: float = 45.0,
+        require_edge: bool = False,
+    ) -> None:
         self.profile_dir = Path(profile_dir) if profile_dir else None
         self.timeout_seconds = timeout_seconds
+        self.require_edge = require_edge
 
     def download(
         self, *, doi: str, article_dir: Path
@@ -262,6 +269,10 @@ class HttpSupplementDownloader:
                 browser = playwright.chromium.connect_over_cdp(endpoint, timeout=10000)
                 if not browser.contexts:
                     raise RuntimeError("浏览器没有可用会话")
+                if self.require_edge:
+                    from .browser import require_edge_browser
+
+                    require_edge_browser(browser)
                 context = browser.contexts[0]
                 from .visible_browser import work_page
 
@@ -273,10 +284,9 @@ class HttpSupplementDownloader:
                         wait_until="domcontentloaded",
                         timeout=int(self.timeout_seconds * 1000),
                     )
-                html = page.content()
-                from .browser import classify_page
+                from .browser import wait_for_verification
 
-                page_status = classify_page(page)
+                page_status = wait_for_verification(page)
                 if page_status in {"challenge_required", "authentication_required"}:
                     return (
                         page_status,
@@ -305,6 +315,7 @@ class HttpSupplementDownloader:
                             )
                         ],
                     )
+                html = page.content()
                 parser = _SupplementLinks(page.url)
                 parser.feed(html)
                 urls = list(dict.fromkeys(parser.urls))
@@ -317,7 +328,7 @@ class HttpSupplementDownloader:
                         [],
                         [],
                     )
-                return self._download_discovered_urls(session, page, urls, article_dir)
+                return self._download_discovered_urls(session, page, urls, article_dir, doi=doi)
         except Exception as exc:  # noqa: BLE001
             return (
                 "browser_error",
@@ -334,7 +345,13 @@ class HttpSupplementDownloader:
             )
 
     def _download_discovered_urls(
-        self, session: requests.Session, page: object, urls: list[str], article_dir: Path
+        self,
+        session: requests.Session,
+        page: object,
+        urls: list[str],
+        article_dir: Path,
+        *,
+        doi: str = "",
     ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
         """每个附件先尝试 HTTP，再回退浏览器；按最终获取结果汇总。"""
         artifacts: list[SupplementArtifact] = []
@@ -350,6 +367,24 @@ class HttpSupplementDownloader:
                 attempts.extend(browser_routes)
                 if files or status != "challenge_required":
                     status = browser_status
+            if status == "challenge_required" and doi:
+                from .browser import wait_for_verification
+
+                page_status = wait_for_verification(page)
+                if (
+                    page_status not in {"challenge_required", "authentication_required"}
+                    and doi
+                    and _is_current_article_page(page, doi)
+                ):
+                    status, files, routes = self._download_urls(session, [url], article_dir)
+                    attempts.extend(routes)
+                    if not files:
+                        browser_status, files, routes = self._download_browser_urls(
+                            page, [url], article_dir
+                        )
+                        attempts.extend(routes)
+                        if files or status != "challenge_required":
+                            status = browser_status
             artifacts.extend(files)
             final_statuses.append(status)
             if status == "challenge_required":

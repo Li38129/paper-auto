@@ -49,7 +49,9 @@ class Harvester:
         self.crossref = crossref or CrossrefMetadataClient(email=email)
         self.openalex = openalex or OpenAlexMetadataClient(email=email)
         self.transport = transport or HttpPdfTransport()
-        self.browser_options = browser_options or {}
+        self.browser_options = dict(browser_options or {})
+        if browser_display == "foreground":
+            self.browser_options.setdefault("channel", "msedge")
         self.download_supplements = download_supplements
         self.supplements_only = supplements_only
         self.browser_display = browser_display
@@ -397,7 +399,8 @@ class Harvester:
 
         profile_dir = self.browser_options.get("profile_dir")
         downloader = HttpSupplementDownloader(
-            profile_dir=Path(profile_dir) if profile_dir else None
+            profile_dir=Path(profile_dir) if profile_dir else None,
+            require_edge=self.browser_display == "foreground",
         )
         status, artifacts, attempts = downloader.download(
             doi=result.doi,

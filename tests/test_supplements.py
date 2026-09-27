@@ -411,3 +411,68 @@ def test_http_gate_preserves_files_and_stops_remaining_requests(tmp_path):
     assert status == "challenge_required" and len(files) == 1
     assert calls == urls[:2]
     assert Path(files[0].path).read_bytes() == b"a,b\n1,2"
+
+
+def test_attachment_gate_retries_once_after_verified_page_recovers(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    calls, waits = [], []
+
+    class Page(StreamPage):
+        url = "https://pubs.acs.org/doi/10.1021/example"
+
+        def evaluate(self, script, *args):
+            if "querySelectorAll" in script:
+                return ["10.1021/example"]
+            return {"status": 403}
+
+    def get(url, **_):
+        calls.append(url)
+        return StreamResponse(url, status=403 if len(calls) == 1 else 200)
+
+    monkeypatch.setattr(
+        "doi_harvester.browser.wait_for_verification",
+        lambda _: waits.append(True) or "authenticated",
+    )
+    status, files, attempts = HttpSupplementDownloader()._download_discovered_urls(
+        SimpleNamespace(get=get),
+        Page(),
+        ["https://cdn.test/data.csv"],
+        tmp_path,
+        doi="10.1021/example",
+    )
+    assert status == "downloaded" and len(files) == 1
+    assert len(calls) == 2 and waits == [True]
+    assert [attempt.success for attempt in attempts] == [False, False, True]
+
+
+def test_attachment_gate_does_not_repeat_same_wait_or_retry_wrong_doi(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    calls, waits = [], []
+
+    class Page(StreamPage):
+        url = "https://pubs.acs.org/doi/10.1021/other"
+
+        def evaluate(self, script, *args):
+            if "querySelectorAll" in script:
+                return ["10.1021/other"]
+            return {"status": 403}
+
+    def get(url, **_):
+        calls.append(url)
+        return StreamResponse(url, status=403)
+
+    monkeypatch.setattr(
+        "doi_harvester.browser.wait_for_verification",
+        lambda _: waits.append(True) or "authenticated",
+    )
+    status, files, _ = HttpSupplementDownloader()._download_discovered_urls(
+        SimpleNamespace(get=get),
+        Page(),
+        ["https://cdn.test/data.csv"],
+        tmp_path,
+        doi="10.1021/example",
+    )
+    assert status == "challenge_required" and not files
+    assert len(calls) == 1 and waits == [True]

@@ -20,6 +20,11 @@ from doi_harvester.browser import (
 )
 
 
+@pytest.fixture(autouse=True)
+def immediate_verification_check(monkeypatch):
+    monkeypatch.setattr("doi_harvester.browser.wait_for_verification", classify_page)
+
+
 class FakeLocator:
     @property
     def first(self) -> "FakeLocator":
@@ -45,7 +50,7 @@ class FakePage:
         self._title = title
 
     def evaluate(self, script, *args):
-        return "autopaper-work" if script == "() => window.name" else []
+        return "autopaper-work" if script == "() => window.name" else ["10.1000/example"]
 
     def set_default_timeout(self, _timeout: int) -> None:
         return None
@@ -143,7 +148,12 @@ class FakeChromium:
         return self.context
 
     def connect_over_cdp(self, *_args: object, **_kwargs: object) -> object:
-        return types.SimpleNamespace(contexts=[self.context])
+        return types.SimpleNamespace(
+            contexts=[self.context],
+            new_browser_cdp_session=lambda: types.SimpleNamespace(
+                send=lambda _: {"userAgent": "Mozilla Edg/130.0"}, detach=lambda: None
+            ),
+        )
 
 
 class FakePlaywrightManager:
@@ -245,15 +255,15 @@ def test_browser_pause_policy_waits_on_challenge(
     from doi_harvester import browser as browser_module
 
     body = b"%PDF-1.7\n" + b"x" * 2048
-    page = SignalPage(title="Just a moment...")
+    page = SignalPage(title="Just a moment...", url="https://publisher.test/doi/10.1000/example")
     install_fake_playwright(monkeypatch, body=body, page=page)
     waits: list[float] = []
 
-    def fake_wait(_page: object, *, timeout_seconds: float) -> str:
-        waits.append(timeout_seconds)
+    def fake_wait(_page: object) -> str:
+        waits.append(10)
         return "ready"
 
-    monkeypatch.setattr(browser_module, "wait_for_authorization", fake_wait)
+    monkeypatch.setattr(browser_module, "wait_for_verification", fake_wait)
     destination = tmp_path / "article.pdf"
     downloader = BrowserPdfDownloader(
         profile_dir=tmp_path / "profile",
@@ -267,7 +277,7 @@ def test_browser_pause_policy_waits_on_challenge(
         candidate_urls=["https://publisher.test/article.pdf"],
     )
 
-    assert waits == [42]
+    assert waits == [10]
     assert result.success is True
     assert destination.read_bytes() == body
 
@@ -585,3 +595,21 @@ def test_explicit_skip_is_not_overridden_by_wait_options(tmp_path):
         profile_dir=tmp_path, challenge_policy="skip", interactive_wait_seconds=600
     )
     assert downloader.challenge_policy == "skip"
+
+
+def test_browser_does_not_extract_links_from_another_doi(tmp_path):
+    class OtherPage(FakePage):
+        def evaluate(self, script, *args):
+            return "autopaper-work" if script == "() => window.name" else ["10.1000/other"]
+
+    context = FakeContext(body=b"%PDF-1.7\n" + b"x" * 2048)
+    context.pages = [OtherPage()]
+    context.request.get = lambda *_args, **_kwargs: pytest.fail("错误 DOI 页面不得请求附件")
+    result = BrowserPdfDownloader(profile_dir=tmp_path)._download_in_context(
+        context=context,
+        doi="10.1000/example",
+        destination=tmp_path / "article.pdf",
+        temporary=tmp_path / "article.pdf.part",
+        candidate_urls=["https://publisher.test/article.pdf"],
+    )
+    assert not result.success and result.reason == "no_pdf_unconfirmed_article"

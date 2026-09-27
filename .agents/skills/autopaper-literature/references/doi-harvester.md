@@ -44,7 +44,7 @@
 
 ## 首次下载
 
-下载默认使用 `--browser-display foreground`：每篇在缓存、HTTP/API 和 SI 请求前，使用固定浏览器工作标签打开并核对对应 DOI 的出版社论文页面。参数名为兼容旧接口而保留；Windows 前台焦点、标签可见性和状态条注入失败不阻断已核对的页面。验证或登录页保持原貌。页面无法打开或 DOI 无法核对时保存检查点并暂停队列，不得继续静默处理。只有用户明确允许无界面下载时使用 `--browser-display off`；旧 `--headless` 默认对应 off，不能与显式 foreground 同时使用。`--detach` 不改变浏览器页面打开要求。
+下载默认使用 `--browser-display foreground --browser-channel msedge`：每篇在外部 Edge 专用标签请求对应 DOI。不要求焦点、页面加载成功或已获得内容元数据；真实标签与本次导航记录绑定后可继续缓存/API。浏览器提取链接仍完整核验 DOI；Edge 无法连接或标签关闭时暂停。每次独立验证缓冲最多10秒，再按确认策略处理。只有用户明确选择无界面运行时使用 off/headless；detach 不改变此要求。
 
 批次含 Elsevier DOI 时，先检查一次全局配置：
 
@@ -123,3 +123,8 @@ Elsevier 浏览器授权示例：
 
 
 每个新下载目标先在 Skill 对话中确认保存绝对路径、下载内容、人工验证策略，再进行 Excel 写入、建目录及下载。请求已含设置时也汇总确认一次；同一目标子批次和恢复不重复询问。CLI 显式传入 `--challenge-policy pause|skip`；MCP `download` 使用 `challenge_policy`（默认 pause，保留 fail-fast 兼容）。人工验证跳过记录 `auth_skipped`，普通恢复不自动重试，最终交付必须报告跳过数，不得把队列 completed 等同于全部下载成功。该规则不允许跳过浏览器连接或 DOI 核验错误。
+
+
+正常调用显式指定 `--browser-channel msedge --browser-display foreground`，使用外部 Edge 专用标签，不使用内置浏览器；off/headless 仅用于用户明确选择的高级运行方式。本次目标 DOI 的导航记录与真实工作标签/会话绑定即可允许缓存/API 继续，焦点、页面加载和内容匹配不是独立传输的前置条件。浏览器提取链接仍严格核验 DOI。
+
+每次独立验证先最多缓冲10秒，提前消失即继续；仍需验证再按已确认策略处理，不重复等待同一次检测结果。旧下载等待参数不延长十秒缓冲，独立 auth 保留原等待。临时包装脚本放在 `temp/doi-harvester/task-scripts/<任务或目标ID>/`，遵守项目 AGENTS.md，不修改真实任务数据库或把一次性配置混入生产代码。
