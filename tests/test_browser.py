@@ -44,6 +44,9 @@ class FakePage:
     def __init__(self, *, title: str = "Article") -> None:
         self._title = title
 
+    def evaluate(self, script, *args):
+        return "autopaper-work" if script == "() => window.name" else []
+
     def set_default_timeout(self, _timeout: int) -> None:
         return None
 

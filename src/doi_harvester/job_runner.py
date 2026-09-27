@@ -132,8 +132,11 @@ def _write_supplement_results_csv(items: list[dict[str, object]], destination: P
                 (
                     attempt
                     for attempt in attempts
-                    if attempt.get("final_url") == file.get("url")
-                    or attempt.get("url") == file.get("url")
+                    if attempt.get("success")
+                    and (
+                        attempt.get("final_url") == file.get("url")
+                        or attempt.get("url") == file.get("url")
+                    )
                 ),
                 {},
             )
@@ -149,8 +152,15 @@ def _write_supplement_results_csv(items: list[dict[str, object]], destination: P
                     "附件结果": match.get("reason", "downloaded"),
                 }
             )
+        successful_urls = {str(file.get("url") or "") for file in files}
         for attempt in attempts:
-            if not attempt.get("success"):
+            if attempt.get("success"):
+                successful_urls.update(
+                    (str(attempt.get("url") or ""), str(attempt.get("final_url") or ""))
+                )
+        final_attempts = {str(attempt.get("url") or ""): attempt for attempt in attempts}
+        for url, attempt in final_attempts.items():
+            if not attempt.get("success") and url not in successful_urls:
                 rows.append(
                     {
                         **base,
@@ -305,9 +315,7 @@ def run_job(
                 None,
             )
             if display_attempt is not None:
-                active_store.set_event(
-                    job_id, f"browser_display:{doi}:{display_attempt.reason}"
-                )
+                active_store.set_event(job_id, f"browser_display:{doi}:{display_attempt.reason}")
             active_store.heartbeat(job_id)
             processed_since_sync += 1
             reason = result.reason or result.status
@@ -359,9 +367,19 @@ def run_job(
                 job_id,
                 "completed" if status == "completed" else status,
             )
+    except KeyboardInterrupt:
+        _write_report(active_store, job_id)
+        _sync_excel(active_store, job_id)
+        active_store.set_job_status(job_id, "needs_attention", error="用户中断；可沿用原任务恢复。")
+        active_store.set_event(job_id, "interrupted")
+        status = "needs_attention"
     except Exception as exc:
-        active_store.set_job_status(job_id, "failed", error=str(exc))
-        status = "failed"
+        _write_report(active_store, job_id)
+        synced = _sync_excel(active_store, job_id)
+        active_store.set_job_status(
+            job_id, "failed" if synced else "needs_attention", error=str(exc)
+        )
+        status = "failed" if synced else "needs_attention"
         raise
     finally:
         stopped.set()

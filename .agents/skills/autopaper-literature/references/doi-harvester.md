@@ -72,7 +72,7 @@
 
 默认不要传 `--supplements`。集中报告只能写到任务目录，不得写进论文根目录或编号目录。命令结束后先按 [Excel 汇总规则](workbook.md) 回写报告，再判断重试与清理。
 
-需要补充材料时，`--supplements` 同时下载正文和 SI；`--supplements-only` 仅下载 SI，两者互斥。两种模式都可使用 `--papers-file` 创建可恢复任务。SI 可为 PDF、Office 文档、表格、压缩包、视频或出版社提供的其他原始格式，保存在每篇目录的 `supplements` 子目录。`--results-csv` 指定逐附件结果清单，建议位于论文根目录。固定编号 CSV 可先运行 `scripts/si-csv-batch.py --csv ... --start ... --end ... --output-dir ... --job-dir ... --node ... --node-modules ...`；脚本先将原编号写入 Excel，随后生成 `papers.json` 和目标 CSV。无效或占位 DOI 保留为待核验记录，不进入下载器，也不能阻断其他有效 DOI。SI-only 的报告只更新工作簿“补充材料”页，不改正文下载字段。不同出版社的补充材料链接结构可能不同；链接未能确认、页面访问失败、验证页或解析失败均须保留为未解决状态，只有页面证据明确时才记录“无补充材料”。出版社要求验证时保留任务与页面，人工完成后使用 `jobs resume <job_id>` 沿用断点。
+需要补充材料时，`--supplements` 同时下载正文和 SI；`--supplements-only` 仅下载 SI，两者互斥。正文及两种 SI 模式均自动创建可恢复任务；`--doi`、`--doi-file`、`--papers-file` 共用任务执行器。所有模式禁止 `--overwrite`。SI 可为 PDF、Office 文档、表格、压缩包、视频或出版社提供的其他原始格式，保存在每篇目录的 `supplements` 子目录。`--results-csv` 指定逐附件结果清单，建议位于论文根目录。固定编号 CSV 可先运行 `scripts/si-csv-batch.py --csv ... --start ... --end ... --output-dir ... --job-dir ... --node ... --node-modules ...`；脚本先将原编号写入 Excel，随后生成 `papers.json` 和目标 CSV。无效或占位 DOI 保留为待核验记录，不进入下载器，也不能阻断其他有效 DOI。SI-only 的报告只更新工作簿“补充材料”页，不改正文下载字段。不同出版社的补充材料链接结构可能不同；链接未能确认、页面访问失败、验证页或解析失败均须保留为未解决状态，只有页面证据明确时才记录“无补充材料”。出版社要求验证时保留任务与页面，人工完成后使用 `jobs resume <job_id>` 沿用断点。
 
 ## 状态判断与一次重试
 
@@ -117,3 +117,6 @@ Elsevier 浏览器授权示例：
 4. 任务目录的绝对路径确认位于任务根目录之下。
 
 否则保留 `literature-records.json`、`resolved-records.json`、下载清单和批次报告。最终报告总数、成功数、缓存命中数、缺少 DOI 条目、失败 DOI 与原因、Excel 路径及保留任务路径。论文编号目录中只新增正文和用户明确要求的补充材料。
+
+
+每篇开始前和完成后分别持久化状态及结果，报告/CSV/Excel 按 `--batch-size` 同步，默认 100。报告未指定时放在 `temp/doi-harvester/jobs/<job_id>`；Ctrl+C 保留任务并同步报告，恢复时继续使用原任务 ID。浏览器发现附件后先走 HTTP，失败附件才回退浏览器；以最终结果验收，不把回退过程中的失败另计为失败附件。DOI 页面核验使用完整规范化 DOI，相互冲突或缺少证据时不复用页面。

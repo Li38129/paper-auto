@@ -24,3 +24,44 @@ def test_update_excel_protects_original_when_runtime_is_missing(
 
     assert result["error"] == "artifact_runtime_unavailable"
     assert workbook.read_bytes() == b"original"
+
+
+@pytest.mark.parametrize("mode", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("detach", [False, True])
+def test_mcp_persists_download_mode_and_task(monkeypatch, tmp_path, mode, detach):
+    import json
+
+    from doi_harvester import mcp_server
+    from doi_harvester.job_store import JobStore
+
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(mcp_server, "run_job", lambda job_id, **_: "completed")
+    monkeypatch.setattr(mcp_server.BrokerManager, "ensure_started", lambda self: 123)
+    output = tmp_path / "papers"
+    source = tmp_path / "papers.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "papers": [
+                    {
+                        "rank": 301,
+                        "doi": "10.1000/example",
+                        "title": "Paper",
+                        "folder_path": str(output / "0301 Paper"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = mcp_server.download(
+        str(source), str(output), supplements=mode[0], supplements_only=mode[1], detach=detach
+    )
+    job = JobStore(runtime / "jobs" / "jobs.sqlite3").get_job(result["job_id"])
+    options = json.loads(job["options_json"])
+    assert (options["supplements"], options["supplements_only"]) == mode
+    assert options["browser_display"] == "foreground"
+    assert job["items"][0]["rank"] == 301
+    assert result["status"] == ("queued" if detach else "completed")

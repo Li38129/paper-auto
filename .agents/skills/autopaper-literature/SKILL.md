@@ -48,3 +48,10 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 不得覆盖有效的既有 `article.pdf`，不得改写论文目录中的其他文件，不得代填凭据、破解验证码、绕过付费墙或机构授权。
 
 如果当前会话已经注册 AutoPaper MCP，优先使用其 `search`、`download`、`job_status` 和 `update_excel` 工具执行相同步骤；工具不可用时使用仓库脚本，不得因此改变 Excel 先写入、报告后回写和失败任务留档规则。
+
+
+## 统一检查点下载规则
+
+正文、仅 SI、正文加 SI 均通过 CLI/MCP 自动创建可恢复任务。CLI 的单 DOI、DOI 列表与固定编号清单共用任务执行器；默认当前终端执行，`--detach` 仅切换 Broker。不得使用 `--overwrite`。每篇保存数据库检查点，默认每 100 篇同步报告、结果 CSV 与已配置的 Excel，并在暂停和结束时同步。未指定报告目录时使用 `temp/doi-harvester/jobs/<job_id>`；授权等待或中断后通过原 ID 恢复，不新建重复任务。
+
+SI 链接由浏览器发现后先尝试 HTTP 流式获取，失败附件再使用浏览器回退。逐次失败尝试不能覆盖最终成功结果；JSON 保留尝试过程，CSV/Excel 记录最终附件结果。页面 DOI 须完整匹配，不能依据子串复用页面；页面不可确认或验证失败保留未解决/授权状态。旧任务缺少 SI 参数时仍按正文模式恢复。有效缓存、编号和目录保持原有规则。

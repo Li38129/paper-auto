@@ -15,7 +15,6 @@ import requests
 
 from .models import Attempt, SupplementArtifact
 
-MAX_SUPPLEMENT_BYTES = 100 * 1024 * 1024
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 SUPPLEMENT_HINTS = (
     "downloadsupplement",
@@ -32,7 +31,6 @@ SUPPLEMENT_HINTS = (
     "additional_file",
     "additional-file",
     "ndownloader/files/",
-    "figshare.com",
     "media.springernature.com",
     "/doi/suppl/",
 )
@@ -44,8 +42,22 @@ SUPPLEMENT_TEXT_HINTS = (
     "supplemental information",
 )
 SUPPLEMENT_EXTENSIONS = {
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".zip", ".rar", ".7z", ".mp4", ".mov", ".avi", ".mpg", ".mpeg", ".gif",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+    ".gif",
 }
 
 
@@ -100,8 +112,11 @@ class _SupplementLinks(HTMLParser):
         has_supplement_label = any(
             hint in self._anchor_context.casefold() for hint in SUPPLEMENT_TEXT_HINTS
         )
+        is_figshare_url = parsed_href.netloc.casefold().endswith("figshare.com")
         is_file_link = Path(path).suffix in SUPPLEMENT_EXTENSIONS
-        if is_hint_url or (has_supplement_label and is_file_link):
+        if (is_hint_url and (not is_figshare_url or has_supplement_label)) or (
+            has_supplement_label and is_file_link
+        ):
             self.urls.append(urljoin(self.base_url, self._anchor_href))
         self._anchor_href = ""
         self._anchor_context = ""
@@ -140,6 +155,19 @@ def _page_confirms_no_supplements(html: str) -> bool:
             "supplementary material is not available",
         )
     )
+
+
+def _is_current_article_page(page: object, doi: str) -> bool:
+    """结合地址和出版社元数据判断当前标签是否已是目标论文页。"""
+    current_url = str(getattr(page, "url", ""))
+    if any(
+        marker in current_url.casefold()
+        for marker in ("/doi/pdf/", "/doi/epdf/", "/articlepdf/", "/pdf/")
+    ):
+        return False
+    from .visible_browser import _page_matches_doi
+
+    return _page_matches_doi(page, doi)
 
 
 def _digest(path: Path) -> str:
@@ -236,12 +264,9 @@ class HttpSupplementDownloader:
                     raise RuntimeError("浏览器没有可用会话")
                 context = browser.contexts[0]
                 from .visible_browser import work_page
+
                 page = work_page(context, self.profile_dir)
-                current_url = page.url.casefold()
-                article_page = doi.casefold() in current_url and not any(
-                    marker in current_url
-                    for marker in ("/doi/pdf/", "/doi/epdf/", "/articlepdf/", "/pdf/")
-                )
+                article_page = _is_current_article_page(page, doi)
                 if page.url != page_url and not article_page:
                     page.goto(
                         page_url,
@@ -250,15 +275,35 @@ class HttpSupplementDownloader:
                     )
                 html = page.content()
                 from .browser import classify_page
+
                 page_status = classify_page(page)
                 if page_status in {"challenge_required", "authentication_required"}:
                     return (
                         page_status,
                         [],
-                        [Attempt(
-                            source="supplement:browser", url=page.url,
-                            success=False, reason=page_status, final_url=page.url,
-                        )],
+                        [
+                            Attempt(
+                                source="supplement:browser",
+                                url=page.url,
+                                success=False,
+                                reason=page_status,
+                                final_url=page.url,
+                            )
+                        ],
+                    )
+                if not _is_current_article_page(page, doi):
+                    return (
+                        "unconfirmed",
+                        [],
+                        [
+                            Attempt(
+                                source="supplement:browser",
+                                url=page.url,
+                                success=False,
+                                reason="article_doi_unconfirmed",
+                                final_url=page.url,
+                            )
+                        ],
                     )
                 parser = _SupplementLinks(page.url)
                 parser.feed(html)
@@ -272,7 +317,7 @@ class HttpSupplementDownloader:
                         [],
                         [],
                     )
-                return self._download_browser_urls(page, urls, article_dir)
+                return self._download_discovered_urls(session, page, urls, article_dir)
         except Exception as exc:  # noqa: BLE001
             return (
                 "browser_error",
@@ -288,6 +333,37 @@ class HttpSupplementDownloader:
                 ],
             )
 
+    def _download_discovered_urls(
+        self, session: requests.Session, page: object, urls: list[str], article_dir: Path
+    ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
+        """每个附件先尝试 HTTP，再回退浏览器；按最终获取结果汇总。"""
+        artifacts: list[SupplementArtifact] = []
+        attempts: list[Attempt] = []
+        final_statuses: list[str] = []
+        for url in urls:
+            status, files, routes = self._download_urls(session, [url], article_dir)
+            attempts.extend(routes)
+            if not files:
+                browser_status, files, browser_routes = self._download_browser_urls(
+                    page, [url], article_dir
+                )
+                attempts.extend(browser_routes)
+                if files or status != "challenge_required":
+                    status = browser_status
+            artifacts.extend(files)
+            final_statuses.append(status)
+        if any(status == "challenge_required" for status in final_statuses):
+            return "challenge_required", artifacts, attempts
+        if any(status not in {"downloaded", "cached"} for status in final_statuses):
+            return "partial" if artifacts else "not_downloadable", artifacts, attempts
+        return (
+            "cached"
+            if final_statuses and all(s == "cached" for s in final_statuses)
+            else "downloaded",
+            artifacts,
+            attempts,
+        )
+
     def _download_browser_urls(
         self, page: object, urls: list[str], article_dir: Path
     ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
@@ -297,6 +373,7 @@ class HttpSupplementDownloader:
         supplement_dir = article_dir / "supplements"
         for index, url in enumerate(urls, start=1):
             temporary: Path | None = None
+            response = {}
             try:
                 response = page.evaluate(
                     """async url => {
@@ -386,7 +463,9 @@ class HttpSupplementDownloader:
                         url=url,
                         success=True,
                         reason=status,
-                        final_url=url,
+                        final_url=str(response.get("finalUrl") or url),
+                        status_code=int(response["status"]),
+                        content_type=content_type,
                         bytes_written=destination.stat().st_size,
                     )
                 )
@@ -396,12 +475,24 @@ class HttpSupplementDownloader:
                         source="supplement:browser",
                         url=url,
                         success=False,
-                        reason=f"browser_download_error:{type(exc).__name__}:{exc}",
+                        reason=(
+                            "authentication_required"
+                            if response.get("status") == 401
+                            else "challenge_required"
+                            if response.get("status") in {403, 429}
+                            else f"browser_download_error:{type(exc).__name__}:{exc}"
+                        ),
+                        status_code=response.get("status"),
+                        final_url=response.get("finalUrl"),
                     )
                 )
             finally:
                 if temporary:
                     temporary.unlink(missing_ok=True)
+        if any(
+            item.reason in {"authentication_required", "challenge_required"} for item in attempts
+        ):
+            return "challenge_required", artifacts, attempts
         if any(not item.success for item in attempts):
             return "partial" if artifacts else "not_downloadable", artifacts, attempts
         return (
@@ -421,6 +512,7 @@ class HttpSupplementDownloader:
         attempts: list[Attempt] = []
         supplement_dir = article_dir / "supplements"
         for index, url in enumerate(urls, start=1):
+            response = None
             try:
                 with session.get(url, timeout=self.timeout_seconds, stream=True) as response:
                     if response.status_code in {401, 403, 429}:
@@ -512,7 +604,9 @@ class HttpSupplementDownloader:
                         source="supplement:http",
                         url=url,
                         success=False,
-                        reason=f"download_error:{type(exc).__name__}",
+                        reason=f"download_error:{type(exc).__name__}:{exc}",
+                        status_code=response.status_code if response is not None else None,
+                        final_url=response.url if response is not None else None,
                     )
                 )
         if any(not item.success for item in attempts):
@@ -571,182 +665,3 @@ def _supplement_filename(
         name = f"{name or f'supplement-{index:02d}'}{extensions.get(content_type, '.bin')}"
     safe = INVALID_FILENAME.sub("_", name).strip(" .")
     return safe or f"supplement-{index:02d}.bin"
-
-
-class BrowserSupplementDownloader:
-    """通过已连接的 CDP 浏览器下载出版社补充材料。"""
-
-    def __init__(self, *, profile_dir: Path, timeout_seconds: float = 60.0) -> None:
-        self.profile_dir = Path(profile_dir)
-        self.timeout_ms = int(timeout_seconds * 1000)
-
-    def download(
-        self,
-        *,
-        doi: str,
-        article_dir: Path,
-    ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
-        """发现补充材料并返回状态、文件和逐链接诊断。"""
-        endpoint = _read_cdp_endpoint(self.profile_dir)
-        if not endpoint:
-            return "browser_session_required", [], []
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return "playwright_not_installed", [], []
-
-        try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.connect_over_cdp(endpoint, timeout=self.timeout_ms)
-                if not browser.contexts:
-                    return "browser_session_required", [], []
-                context = browser.contexts[0]
-                from .visible_browser import work_page
-                page = work_page(context, self.profile_dir)
-                return self._download_from_page(
-                    page=page,
-                    doi=doi,
-                    article_dir=article_dir,
-                )
-        except Exception as exc:  # noqa: BLE001
-            attempt = Attempt(
-                source="supplement:browser",
-                url=f"https://doi.org/{doi}",
-                success=False,
-                reason=f"browser_error:{type(exc).__name__}",
-            )
-            return "browser_error", [], [attempt]
-
-    def _download_from_page(
-        self,
-        *,
-        page: object,
-        doi: str,
-        article_dir: Path,
-    ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
-        if doi.casefold() not in str(getattr(page, "url", "")).casefold():
-            page.goto(
-                f"https://doi.org/{doi}",
-                wait_until="domcontentloaded",
-                timeout=self.timeout_ms,
-            )
-        page.wait_for_timeout(3000)
-        urls = page.evaluate(
-            """
-            () => [...document.querySelectorAll("a[href]")]
-                .map(link => link.href)
-                .filter(href => {
-                    const value = href.toLowerCase();
-                    return value.includes("downloadsupplement")
-                        || value.includes("article-supplement")
-                        || value.includes("suppl_file")
-                        || value.includes("/suppdata/")
-                        || value.includes("/esm/")
-                        || value.includes("mmc");
-                })
-            """
-        )
-        urls = list(dict.fromkeys(str(url) for url in urls))
-        if not urls:
-            return "unconfirmed", [], []
-
-        supplement_dir = article_dir / "supplements"
-        artifacts: list[SupplementArtifact] = []
-        attempts: list[Attempt] = []
-        used_names: set[str] = set()
-        for index, url in enumerate(urls, start=1):
-            payload = self._fetch(page=page, url=url)
-            if payload is None:
-                attempts.append(
-                    Attempt(
-                        source="supplement:browser",
-                        url=url,
-                        success=False,
-                        reason="not_downloadable",
-                    )
-                )
-                continue
-            body, status_code, content_type, disposition, final_url = payload
-            name = _supplement_filename(
-                url=final_url,
-                disposition=disposition,
-                content_type=content_type,
-                index=index,
-            )
-            if name in used_names:
-                name = f"{index:02d}-{name}"
-            used_names.add(name)
-            supplement_dir.mkdir(parents=True, exist_ok=True)
-            destination = supplement_dir / name
-            temporary = destination.with_suffix(f"{destination.suffix}.part")
-            temporary.write_bytes(body)
-            temporary.replace(destination)
-            digest = hashlib.sha256(body).hexdigest().upper()
-            artifacts.append(
-                SupplementArtifact(
-                    name=name,
-                    path=str(destination),
-                    url=final_url,
-                    content_type=content_type,
-                    bytes_written=len(body),
-                    sha256=digest,
-                )
-            )
-            attempts.append(
-                Attempt(
-                    source="supplement:browser",
-                    url=url,
-                    success=True,
-                    reason="downloaded",
-                    status_code=status_code,
-                    content_type=content_type,
-                    final_url=final_url,
-                    bytes_written=len(body),
-                )
-            )
-        return ("downloaded" if artifacts else "not_downloadable"), artifacts, attempts
-
-    def _fetch(
-        self,
-        *,
-        page: object,
-        url: str,
-    ) -> tuple[bytes, int, str, str, str] | None:
-        try:
-            payload = page.evaluate(
-                """
-                async (url) => {
-                    const response = await fetch(url, {credentials: "include"});
-                    const bytes = new Uint8Array(await response.arrayBuffer());
-                    let binary = "";
-                    const chunkSize = 32768;
-                    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-                        const chunk = bytes.subarray(offset, offset + chunkSize);
-                        binary += String.fromCharCode(...chunk);
-                    }
-                    return {
-                        status: response.status,
-                        contentType: response.headers.get("content-type") || "",
-                        disposition: response.headers.get("content-disposition") || "",
-                        finalUrl: response.url,
-                        body: btoa(binary),
-                    };
-                }
-                """,
-                url,
-            )
-            body = base64.b64decode(payload["body"], validate=True)
-            status_code = int(payload["status"])
-            content_type = str(payload["contentType"]).split(";", maxsplit=1)[0].lower()
-            disposition = str(payload["disposition"])
-            final_url = str(payload["finalUrl"])
-        except Exception:  # noqa: BLE001
-            return None
-        if (
-            status_code >= 400
-            or not body
-            or len(body) > MAX_SUPPLEMENT_BYTES
-            or content_type in {"text/html", "application/xhtml+xml"}
-        ):
-            return None
-        return body, status_code, content_type, disposition, final_url

@@ -9,6 +9,26 @@ from doi_harvester.pipeline import Harvester
 from doi_harvester.visible_browser import DisplayResult
 
 
+def test_arxiv_doi_matches_its_abs_page_even_when_metadata_points_to_version_of_record() -> None:
+    from doi_harvester.visible_browser import _page_matches_doi
+
+    page = SimpleNamespace(
+        url="https://arxiv.org/abs/1412.6027",
+        evaluate=lambda _script: ["10.1039/C4CP03677H"],
+    )
+    assert _page_matches_doi(page, "10.48550/arxiv.1412.6027")
+
+
+def test_arxiv_doi_does_not_match_a_different_abs_page() -> None:
+    from doi_harvester.visible_browser import _page_matches_doi
+
+    page = SimpleNamespace(
+        url="https://arxiv.org/abs/1412.9999",
+        evaluate=lambda _script: ["10.1039/C4CP03677H"],
+    )
+    assert not _page_matches_doi(page, "10.48550/arxiv.1412.6027")
+
+
 def test_stale_cdp_restarts_after_old_playwright_closes(monkeypatch, tmp_path: Path) -> None:
     from doi_harvester.visible_browser import VisibleBrowser
 
@@ -50,7 +70,7 @@ def test_stale_cdp_restarts_after_old_playwright_closes(monkeypatch, tmp_path: P
             return None
 
         def evaluate(self, *_args):
-            return True
+            return ["10.1000/example"]
 
     class Authorizer:
         def __init__(self, **_kwargs):
@@ -137,6 +157,9 @@ def test_article_page_opens_when_window_focus_and_status_panel_fail(
         def wait_for_timeout(self, *_args):
             return None
 
+        def evaluate(self, *_args):
+            return ["10.1000/example"]
+
         def bring_to_front(self):
             raise RuntimeError("Windows 拒绝置前")
 
@@ -173,6 +196,78 @@ def test_article_page_opens_when_window_focus_and_status_panel_fail(
     assert result.status == "visible"
     assert "article_page_opened" in result.event
     assert "status_panel_unavailable" in result.event
+
+
+def test_acs_direct_fallback_when_doi_resolver_stays_on_doi_org(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from doi_harvester.visible_browser import VisibleBrowser
+
+    class Page:
+        url = "about:blank"
+
+        def goto(self, url: str, **_kwargs):
+            if url.startswith("https://pubs.acs.org/doi/"):
+                self.url = url
+            else:
+                self.url = "https://doi.org/10.1021/acsaem.6c00640"
+
+        def wait_for_url(self, *_args, **_kwargs):
+            raise TimeoutError("DOI 跳转未完成")
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, *_args):
+            return None
+
+        def bring_to_front(self):
+            return None
+
+        def evaluate(self, *_args):
+            return ["10.1000/example"]
+
+    class Session:
+        def send(self, command: str, *_args):
+            return {"windowId": 1} if command == "Browser.getWindowForTarget" else {}
+
+    page = Page()
+    context = SimpleNamespace(pages=[page], new_cdp_session=lambda _page: Session())
+    browser = SimpleNamespace(contexts=[context])
+    playwright = SimpleNamespace(
+        chromium=SimpleNamespace(connect_over_cdp=lambda *_args, **_kwargs: browser)
+    )
+
+    class PlaywrightContext:
+        def __enter__(self):
+            return playwright
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.sync_api",
+        SimpleNamespace(sync_playwright=PlaywrightContext, TimeoutError=TimeoutError),
+    )
+    monkeypatch.setattr(
+        "doi_harvester.visible_browser._read_cdp_endpoint", lambda *_: "http://127.0.0.1:11111"
+    )
+    monkeypatch.setattr("doi_harvester.visible_browser.work_page", lambda *_: page)
+    monkeypatch.setattr("doi_harvester.visible_browser.classify_page", lambda *_: "ready")
+    monkeypatch.setattr(
+        "doi_harvester.visible_browser._page_matches_doi",
+        lambda _page, doi: doi == "10.1021/acsaem.6c00640" and "/doi/" in page.url,
+    )
+    monkeypatch.setattr(VisibleBrowser, "update", lambda *_args, **_kwargs: True)
+
+    result = VisibleBrowser(profile_dir=tmp_path).show(
+        doi="10.1021/acsaem.6c00640", rank=1549, mode="仅补充材料"
+    )
+
+    assert result.status == "visible"
+    assert result.url == "https://pubs.acs.org/doi/10.1021/acsaem.6c00640"
+    assert "acs_direct_fallback" in result.event
 
 
 def test_page_doi_matches_sciencedirect_metadata() -> None:
@@ -243,3 +338,23 @@ def test_display_options_and_retryable_failure(tmp_path: Path) -> None:
         reason="browser_not_foreground",
     )
     assert _item_status(result) == "retryable"
+
+
+def test_doi_matching_requires_complete_consistent_evidence():
+    from doi_harvester.visible_browser import _page_matches_doi
+
+    cases = [
+        ("https://pubs.acs.org/doi/10.1000/Example-long", [], "10.1000/example", False),
+        ("https://pubs.acs.org/doi/10.1000%2FEXAMPLE", [], "doi:10.1000/example", True),
+        (
+            "https://publisher.test/article",
+            ["https://doi.org/10.1000/EXAMPLE"],
+            "10.1000/example",
+            True,
+        ),
+        ("https://pubs.acs.org/doi/10.1000/example", ["10.1000/other"], "10.1000/example", False),
+        ("https://www.sciencedirect.com/science/article/pii/S123", [], "10.1000/example", False),
+    ]
+    for url, metadata, doi, expected in cases:
+        page = SimpleNamespace(url=url, evaluate=lambda *_, metadata=metadata: metadata)
+        assert _page_matches_doi(page, doi) is expected

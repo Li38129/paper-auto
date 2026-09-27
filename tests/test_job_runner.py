@@ -131,9 +131,7 @@ def test_run_job_pauses_queue_when_browser_connection_breaks(tmp_path: Path) -> 
     assert store.get_job(job_id)["last_event"].startswith("browser_recoverable_error:")
 
 
-def test_run_job_passes_saved_browser_supervision_options(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_run_job_passes_saved_browser_supervision_options(monkeypatch, tmp_path: Path) -> None:
     from doi_harvester import job_runner
 
     store = JobStore(tmp_path / "jobs.sqlite3")
@@ -181,9 +179,7 @@ def test_run_job_passes_saved_browser_supervision_options(
     assert captured["browser_display"] == "foreground"
 
 
-def test_run_job_checkpoints_excel_and_keeps_processing_skips(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_run_job_checkpoints_excel_and_keeps_processing_skips(monkeypatch, tmp_path: Path) -> None:
     from doi_harvester import job_runner
 
     store = JobStore(tmp_path / "jobs.sqlite3")
@@ -229,3 +225,71 @@ def test_run_job_checkpoints_excel_and_keeps_processing_skips(
     assert job["counts"] == {"policy_skipped": 3}
     assert job["excel_status"] == "updated"
     assert len(sync_calls) == 2
+
+
+def test_interrupted_task_reuses_id_and_committed_results(tmp_path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {
+                "rank": i,
+                "doi": f"10.1000/{i}",
+                "title": str(i),
+                "folder_path": str(tmp_path / str(i)),
+            }
+            for i in (1, 2)
+        ],
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=False,
+    )
+    seen = []
+
+    class Worker:
+        def download(self, doi, *, article_dir):
+            state = store.get_job(job_id)
+            assert (
+                next(item for item in state["items"] if item["doi"] == doi)["status"] == "running"
+            )
+            seen.append(doi)
+            if doi.endswith("2") and len(seen) == 2:
+                assert state["items"][0]["status"] == "downloaded"
+                raise KeyboardInterrupt()
+            return DownloadResult(
+                doi=doi, success=True, status="downloaded", article_dir=article_dir
+            )
+
+    assert run_job(job_id, store=store, harvester=Worker()) == "needs_attention"
+    assert store.get_job(job_id)["counts"] == {"downloaded": 1, "running": 1}
+    assert (Path(store.get_job(job_id)["report_dir"]) / "batch-report.json").exists()
+    store.prepare_resume(job_id)
+    assert run_job(job_id, store=store, harvester=Worker()) == "completed"
+    assert seen == ["10.1000/1", "10.1000/2", "10.1000/2"]
+
+
+def test_old_task_defaults_to_article_mode(monkeypatch, tmp_path):
+    from doi_harvester import job_runner
+
+    captured = {}
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {"doi": "10.1000/example", "title": "Paper", "folder_path": str(tmp_path / "paper")}
+        ],
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=False,
+    )
+
+    class Worker:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def download(self, doi, *, article_dir):
+            return DownloadResult(doi=doi, success=True, status="cached", article_dir=article_dir)
+
+    monkeypatch.setattr(job_runner, "Harvester", Worker)
+    assert run_job(job_id, store=store) == "completed"
+    assert captured["download_supplements"] is False
+    assert captured["supplements_only"] is False
+    assert captured["browser_display"] == "foreground"

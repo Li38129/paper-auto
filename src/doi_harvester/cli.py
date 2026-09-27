@@ -30,7 +30,7 @@ from .config import (
 from .doctor import run_doctor
 from .doi import InvalidDoiError, doi_slug, normalize_doi
 from .elsevier import ElsevierApiClient
-from .job_runner import _write_supplement_results_csv, run_broker, run_job
+from .job_runner import run_broker, run_job
 from .job_store import JobStore
 from .papers import PaperJob, PapersFileError, load_paper_jobs
 from .pipeline import Harvester
@@ -61,7 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     download.add_argument("--email", help="Crossref/OpenAlex 礼貌池联系邮箱。")
     download.add_argument("--results-csv", type=Path, help="补充材料逐附件结果 CSV 的绝对路径。")
-    download.add_argument("--overwrite", action="store_true", help="覆盖已验证的现有 PDF。")
+    download.add_argument(
+        "--overwrite", action="store_true", help="已禁用：下载任务始终复用有效文件。"
+    )
     supplement_modes = download.add_mutually_exclusive_group()
     supplement_modes.add_argument(
         "--supplements",
@@ -86,7 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--profile-dir", type=Path, help="持久化浏览器配置目录。")
     download.add_argument("--headless", action="store_true", help="以无界面模式运行浏览器兜底。")
     download.add_argument(
-        "--browser-display", choices=["foreground", "off"],
+        "--browser-display",
+        choices=["foreground", "off"],
         help="每篇下载前打开并核对出版社论文页面；默认 foreground，--headless 默认 off。",
     )
     download.add_argument(
@@ -270,18 +273,6 @@ def _load_dois(raw_dois: list[str], doi_file: Path | None) -> list[str]:
     return normalized
 
 
-def _write_batch_report(report_dir: Path, results: list[dict[str, object]]) -> Path:
-    path = report_dir / "batch-report.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.part")
-    temporary.write_text(
-        json.dumps({"schema_version": 1, "results": results}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-    return path
-
-
 def main(argv: list[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv[1:]
     if not arguments or arguments[0] not in {
@@ -384,142 +375,67 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile_dir is not None:
         browser_options["profile_dir"] = args.profile_dir
 
-    if args.detach or args.papers_file is not None:
-        if args.overwrite:
-            raise SystemExit("可恢复任务暂不支持 --overwrite。")
-        runtime = default_runtime_dir().resolve()
-        profile_dir = Path(
-            browser_options.get("profile_dir") or runtime / "profiles" / "default"
-        ).resolve()
-        store = JobStore(runtime / "jobs" / "jobs.sqlite3")
-        records = []
-        for rank, (doi, paper_job) in enumerate(tasks, start=1):
-            records.append(
-                {
-                    "rank": paper_job.rank if paper_job else rank,
-                    "doi": doi,
-                    "title": paper_job.title if paper_job else doi,
-                    "folder_path": str(
-                        paper_job.folder_path
-                        if paper_job
-                        else (args.output_dir.resolve() / doi_slug(doi))
-                    ),
-                    "journal": paper_job.journal if paper_job else "",
-                    "issn": paper_job.issn if paper_job else "",
-                    "year": paper_job.year if paper_job else None,
-                }
-            )
-        if args.workbook and not args.report_dir:
-            raise SystemExit("Excel 回写要求同时提供 --report-dir。")
-        if bool(args.node_path) != bool(args.node_modules):
-            raise SystemExit("--node-path 与 --node-modules 必须同时提供。")
-        job_id = store.create_job(
-            records=records,
-            output_dir=args.output_dir.resolve(),
-            report_dir=args.report_dir.resolve() if args.report_dir else None,
-            browser_fallback=args.browser_fallback,
-            profile_dir=profile_dir,
-            options={
-                "delay_seconds": args.delay,
-                "email": args.email or "",
-                "headless": args.headless,
-                "browser_display": browser_display,
-                "browser_channel": args.browser_channel or "",
-                "interactive_wait_seconds": args.interactive_wait,
-                "challenge_policy": challenge_policy,
-                "challenge_timeout_seconds": challenge_timeout,
-                "keep_browser_open": not args.headless and challenge_policy == "pause",
-                "access_environment": args.access_environment or "default",
-                "supplements": args.supplements,
-                "supplements_only": args.supplements_only,
-                "results_csv": str(args.results_csv.resolve()) if args.results_csv else "",
-            },
-            workbook_path=args.workbook,
-            node_path=args.node_path,
-            node_modules=args.node_modules,
-            batch_size=args.batch_size,
+    if args.overwrite:
+        raise SystemExit("可恢复任务暂不支持 --overwrite。")
+    runtime = default_runtime_dir().resolve()
+    profile_dir = Path(
+        browser_options.get("profile_dir") or runtime / "profiles" / "default"
+    ).resolve()
+    store = JobStore(runtime / "jobs" / "jobs.sqlite3")
+    records = []
+    for rank, (doi, paper_job) in enumerate(tasks, start=1):
+        records.append(
+            {
+                "rank": paper_job.rank if paper_job else rank,
+                "doi": doi,
+                "title": paper_job.title if paper_job else doi,
+                "folder_path": str(
+                    paper_job.folder_path
+                    if paper_job
+                    else (args.output_dir.resolve() / doi_slug(doi))
+                ),
+                "journal": paper_job.journal if paper_job else "",
+                "issn": paper_job.issn if paper_job else "",
+                "year": paper_job.year if paper_job else None,
+            }
         )
-        if args.detach:
-            pid = BrokerManager(profile_dir=profile_dir, runtime_dir=runtime).ensure_started()
-            print(f"任务已排队：{job_id}；Broker PID：{pid}")
-            print(f"查看状态：doi-harvester jobs status {job_id}")
-            return 0
-        print(f"任务开始：{job_id}；前台监督模式。", flush=True)
-        status = run_job(job_id, store=store)
-        print(f"任务结束：{job_id}；状态：{status}", flush=True)
-        return 0 if status == "completed" else 2
-
-    harvester = Harvester(
-        output_dir=args.output_dir,
+    if bool(args.node_path) != bool(args.node_modules):
+        raise SystemExit("--node-path 与 --node-modules 必须同时提供。")
+    job_id = store.create_job(
+        records=records,
+        output_dir=args.output_dir.resolve(),
+        report_dir=args.report_dir.resolve() if args.report_dir else None,
         browser_fallback=args.browser_fallback,
-        email=args.email,
-        browser_options=browser_options,
-        download_supplements=args.supplements or args.supplements_only,
-        supplements_only=args.supplements_only,
-        browser_display=browser_display,
-        access_store=AccessPolicyStore(environment=args.access_environment),
+        profile_dir=profile_dir,
+        options={
+            "delay_seconds": args.delay,
+            "email": args.email or "",
+            "headless": args.headless,
+            "browser_display": browser_display,
+            "browser_channel": args.browser_channel or "",
+            "interactive_wait_seconds": args.interactive_wait,
+            "challenge_policy": challenge_policy,
+            "challenge_timeout_seconds": challenge_timeout,
+            "keep_browser_open": not args.headless and challenge_policy == "pause",
+            "access_environment": args.access_environment or "default",
+            "supplements": args.supplements,
+            "supplements_only": args.supplements_only,
+            "results_csv": str(args.results_csv.resolve()) if args.results_csv else "",
+        },
+        workbook_path=args.workbook,
+        node_path=args.node_path,
+        node_modules=args.node_modules,
+        batch_size=args.batch_size,
     )
-    serialized: list[dict[str, object]] = []
-    for index, (doi, paper_job) in enumerate(tasks):
-        harvester.display_rank = paper_job.rank if paper_job else index + 1
-        if paper_job is None:
-            result = harvester.download(doi, overwrite=args.overwrite)
-        else:
-            result = harvester.download(
-                doi,
-                overwrite=args.overwrite,
-                article_dir=paper_job.folder_path,
-            )
-        result_payload = result.to_dict()
-        if paper_job is not None:
-            result_payload.update(
-                {
-                    "rank": paper_job.rank,
-                    "requested_title": paper_job.title,
-                    "requested_folder_path": str(paper_job.folder_path),
-                }
-            )
-        serialized.append(result_payload)
-        marker = "成功" if result.success else "失败"
-        print(f"[{marker}] {doi} -> {result.pdf_path or result.article_dir}")
-        reason = result.reason or result.status
-        if challenge_policy == "fail-fast" and reason in {
-            "challenge_required",
-            "authentication_required",
-        }:
-            print("检测到需要人工验证的页面，已按 fail-fast 策略停止后续 DOI。")
-            break
-        if reason.startswith("browser_display_") or reason in {
-            "browser_not_foreground", "browser_not_visible"
-        }:
-            print(f"浏览器页面不可见，已停止队列：{reason}")
-            break
-        if index < len(tasks) - 1 and args.delay > 0:
-            time.sleep(args.delay)
-
-    succeeded = sum(bool(item["success"]) for item in serialized)
-    if args.results_csv:
-        _write_supplement_results_csv(
-            [
-                {
-                    "rank": item.get("rank", index + 1),
-                    "doi": item["doi"],
-                    "status": item["status"],
-                    "supplement_status": item.get("supplement_status", "not_requested"),
-                    "supplements": item.get("supplements", []),
-                    "supplement_attempts": item.get("supplement_attempts", []),
-                    "failure_reason": item.get("reason", ""),
-                }
-                for index, item in enumerate(serialized)
-            ],
-            args.results_csv.resolve(),
-        )
-    if args.report_dir is None:
-        print(f"汇总：{succeeded}/{len(serialized)} 成功；未生成审查报告。")
-    else:
-        report_path = _write_batch_report(args.report_dir, serialized)
-        print(f"汇总：{succeeded}/{len(serialized)} 成功；报告：{report_path}")
-    return 0 if succeeded == len(serialized) else 2
+    if args.detach:
+        pid = BrokerManager(profile_dir=profile_dir, runtime_dir=runtime).ensure_started()
+        print(f"任务已排队：{job_id}；Broker PID：{pid}")
+        print(f"查看状态：doi-harvester jobs status {job_id}")
+        return 0
+    print(f"任务开始：{job_id}；前台监督模式。", flush=True)
+    status = run_job(job_id, store=store)
+    print(f"任务结束：{job_id}；状态：{status}", flush=True)
+    return 0 if status == "completed" else 2
 
 
 def _run_elsevier_setup(args: argparse.Namespace) -> int:

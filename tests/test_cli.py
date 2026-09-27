@@ -3,11 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from doi_harvester import cli
+from doi_harvester import cli, job_runner
 from doi_harvester.browser import AuthorizationResult
 from doi_harvester.config import ElsevierConfig, GlobalConfig
 from doi_harvester.elsevier import ElsevierDownload
 from doi_harvester.models import DownloadResult
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(tmp_path / "runtime"))
 
 
 def test_supplement_modes_are_mutually_exclusive() -> None:
@@ -45,7 +50,9 @@ def test_main_does_not_write_batch_report_by_default(
         def __init__(self, **_kwargs: object) -> None:
             return None
 
-        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+        def download(
+            self, doi: str, *, overwrite: bool = False, article_dir: Path | None = None
+        ) -> DownloadResult:
             del overwrite
             article_dir = tmp_path / doi.replace("/", "_")
             article_dir.mkdir(parents=True, exist_ok=True)
@@ -60,7 +67,7 @@ def test_main_does_not_write_batch_report_by_default(
                 source="test",
             )
 
-    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    monkeypatch.setattr(job_runner, "Harvester", FakeHarvester)
 
     exit_code = cli.main(
         ["--doi", "10.1000/example", "--output-dir", str(tmp_path), "--delay", "0"]
@@ -77,7 +84,9 @@ def test_main_writes_batch_report_to_explicit_directory(
         def __init__(self, **_kwargs: object) -> None:
             return None
 
-        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+        def download(
+            self, doi: str, *, overwrite: bool = False, article_dir: Path | None = None
+        ) -> DownloadResult:
             del overwrite
             article_dir = tmp_path / doi.replace("/", "_")
             article_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +101,7 @@ def test_main_writes_batch_report_to_explicit_directory(
                 source="test",
             )
 
-    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    monkeypatch.setattr(job_runner, "Harvester", FakeHarvester)
     report_dir = tmp_path / "audit"
 
     exit_code = cli.main(
@@ -122,7 +131,9 @@ def test_main_keeps_partial_failure_in_explicit_report(
         def __init__(self, **_kwargs: object) -> None:
             return None
 
-        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+        def download(
+            self, doi: str, *, overwrite: bool = False, article_dir: Path | None = None
+        ) -> DownloadResult:
             del overwrite
             article_dir = tmp_path / doi.replace("/", "_")
             if doi.endswith("success"):
@@ -144,7 +155,7 @@ def test_main_keeps_partial_failure_in_explicit_report(
                 article_dir=article_dir,
             )
 
-    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    monkeypatch.setattr(job_runner, "Harvester", FakeHarvester)
     report_dir = tmp_path / "job"
 
     exit_code = cli.main(
@@ -168,7 +179,7 @@ def test_main_keeps_partial_failure_in_explicit_report(
     assert report_path.is_file()
     assert [result["status"] for result in report["results"]] == [
         "downloaded",
-        "challenge_required",
+        "auth_required",
     ]
 
 
@@ -181,7 +192,9 @@ def test_foreground_browser_fallback_defaults_to_pause(
         def __init__(self, **kwargs: object) -> None:
             options.update(kwargs)
 
-        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+        def download(
+            self, doi: str, *, overwrite: bool = False, article_dir: Path | None = None
+        ) -> DownloadResult:
             del overwrite
             return DownloadResult(
                 doi=doi,
@@ -190,7 +203,7 @@ def test_foreground_browser_fallback_defaults_to_pause(
                 article_dir=tmp_path,
             )
 
-    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    monkeypatch.setattr(job_runner, "Harvester", FakeHarvester)
 
     exit_code = cli.main(
         [
@@ -221,7 +234,9 @@ def test_fail_fast_stops_after_auth_challenge(
         def __init__(self, **_kwargs: object) -> None:
             return None
 
-        def download(self, doi: str, *, overwrite: bool = False) -> DownloadResult:
+        def download(
+            self, doi: str, *, overwrite: bool = False, article_dir: Path | None = None
+        ) -> DownloadResult:
             del overwrite
             calls.append(doi)
             return DownloadResult(
@@ -231,7 +246,7 @@ def test_fail_fast_stops_after_auth_challenge(
                 article_dir=tmp_path,
             )
 
-    monkeypatch.setattr(cli, "Harvester", FakeHarvester)
+    monkeypatch.setattr(job_runner, "Harvester", FakeHarvester)
 
     exit_code = cli.main(
         [
@@ -483,3 +498,73 @@ def test_elsevier_setup_explains_api_configuration_error(
     output = capsys.readouterr().out
     assert exit_code == 2
     assert "Article Retrieval API" in output
+
+
+@pytest.mark.parametrize("mode", [[], ["--supplements"], ["--supplements-only"]])
+@pytest.mark.parametrize("entry", ["doi", "doi-file", "papers-file"])
+@pytest.mark.parametrize("detach", [False, True])
+def test_all_inputs_and_modes_create_checkpoint_task(monkeypatch, tmp_path, mode, entry, detach):
+    from doi_harvester.job_store import JobStore
+
+    captured = {}
+
+    def execute(job_id, *, store):
+        captured.update(store.get_job(job_id))
+        captured["items"] = store.get_job(job_id)["items"]
+        return "completed"
+
+    monkeypatch.setattr(cli, "run_job", execute)
+    monkeypatch.setattr(cli.BrokerManager, "ensure_started", lambda self: 123)
+    folder = tmp_path / "0420 Paper"
+    args = ["download", "--output-dir", str(tmp_path / "papers"), *mode]
+    if entry == "doi":
+        args += ["--doi", "10.1000/example"]
+    elif entry == "doi-file":
+        source = tmp_path / "dois.txt"
+        source.write_text("10.1000/example", encoding="utf-8")
+        args += ["--doi-file", str(source)]
+    else:
+        source = tmp_path / "papers.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "papers": [
+                        {
+                            "rank": 420,
+                            "doi": "10.1000/example",
+                            "title": "Paper",
+                            "folder_path": str(folder),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        args += ["--papers-file", str(source)]
+    if detach:
+        args += ["--detach"]
+    assert cli.main(args) == 0
+    store = JobStore(tmp_path / "runtime" / "jobs" / "jobs.sqlite3")
+    jobs = store.list_jobs()
+    assert len(jobs) == 1
+    job = store.get_job(jobs[0]["id"])
+    options = json.loads(job["options_json"])
+    assert options["supplements"] == (mode == ["--supplements"])
+    assert options["supplements_only"] == (mode == ["--supplements-only"])
+    assert options["browser_display"] == "foreground"
+    assert job["batch_size"] == 100
+    assert Path(job["report_dir"]) == tmp_path / "runtime" / "jobs" / job["id"]
+    items = store.get_job(job["id"])["items"]
+    assert items[0]["rank"] == (420 if entry == "papers-file" else 1)
+    assert Path(items[0]["folder_path"]) == (
+        folder if entry == "papers-file" else tmp_path / "papers" / "10.1000_example"
+    )
+    assert bool(captured) is (not detach)
+
+
+@pytest.mark.parametrize("mode", [[], ["--supplements"], ["--supplements-only"]])
+def test_overwrite_rejected_before_task_creation(tmp_path, mode):
+    with pytest.raises(SystemExit, match="overwrite"):
+        cli.main(["download", "--doi", "10.1000/example", "--overwrite", *mode])
+    assert not (tmp_path / "runtime" / "jobs" / "jobs.sqlite3").exists()

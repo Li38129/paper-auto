@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,8 +26,34 @@ class _CDPConnectionError(Exception):
 
 def _page_matches_doi(page: object, doi: str) -> bool:
     """核对工作标签 URL 或论文元数据中的 DOI。"""
-    if doi in unquote(urlsplit(str(page.url)).path).casefold():
-        return True
+    try:
+        target = normalize_doi(doi)
+    except InvalidDoiError:
+        return False
+    page_url = urlsplit(str(page.url))
+    page_path = unquote(page_url.path).rstrip("/")
+    arxiv_prefix = "10.48550/arxiv."
+    if target.startswith(arxiv_prefix) and (
+        (page_url.hostname or "").casefold() in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
+    ):
+        return page_path.casefold() == f"/abs/{target[len(arxiv_prefix) :]}"
+
+    def candidate(raw: str) -> str | None:
+        parsed = urlsplit(raw)
+        if parsed.scheme in {"http", "https"}:
+            path = unquote(parsed.path).rstrip("/")
+            if (parsed.hostname or "").casefold() in {"doi.org", "dx.doi.org"}:
+                raw = path.lstrip("/")
+            else:
+                match = re.search(r"(?:^|/)10\.\d{4,9}/", path, re.IGNORECASE)
+                if not match:
+                    return None
+                raw = path[match.start() :].lstrip("/")
+        try:
+            return normalize_doi(raw)
+        except InvalidDoiError:
+            return None
+
     values = page.evaluate(
         """() => Array.from(document.querySelectorAll(
           'meta[name="citation_doi"], meta[name="dc.identifier"], '
@@ -35,20 +62,14 @@ def _page_matches_doi(page: object, doi: str) -> bool:
           + 'meta[name="citation_id"], link[rel="canonical"], [itemprop="doi"]'
         )).map(node => node.content || node.href || node.textContent || '')"""
     )
-    for value in values or []:
-        try:
-            if normalize_doi(str(value)) == doi:
-                return True
-        except InvalidDoiError:
-            if doi in unquote(str(value)).casefold():
-                return True
-    return False
+    metadata = {value for raw in values or [] if (value := candidate(str(raw)))}
+    url_doi = candidate(str(page.url))
+    known = metadata | ({url_doi} if url_doi else set())
+    return known == {target}
 
 
 def work_page(context: object, profile_dir: Path | None = None) -> object:
     """复用专用工作标签，避免覆盖用户打开的其他网页。"""
-    if context.pages and not hasattr(context.pages[0], "evaluate"):
-        return context.pages[-1]
     marker = Path(profile_dir) / "work-target.json" if profile_dir else None
     target_id = ""
     if marker:
@@ -70,8 +91,7 @@ def work_page(context: object, profile_dir: Path | None = None) -> object:
         except Exception:
             continue
     page = context.new_page()
-    if hasattr(page, "evaluate"):
-        page.evaluate("() => { window.name = 'autopaper-work'; }")
+    page.evaluate("() => { window.name = 'autopaper-work'; }")
     if marker and hasattr(context, "new_cdp_session"):
         try:
             session = context.new_cdp_session(page)
@@ -129,6 +149,16 @@ class VisibleBrowser:
                             lambda url: not url.startswith("https://doi.org/"),
                             timeout=20000,
                         )
+                if page.url.startswith("https://doi.org/") and doi.startswith("10.1021/"):
+                    # ACS 页面可由 DOI 直达；解析器失败时改用出版社入口继续核验。
+                    acs_url = f"https://pubs.acs.org/doi/{doi}"
+                    try:
+                        page.goto(acs_url, wait_until="domcontentloaded", timeout=60000)
+                    except PlaywrightTimeoutError:
+                        events.append("acs_direct_navigation_timeout")
+                    with suppress(PlaywrightTimeoutError):
+                        page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    events.append("acs_direct_fallback")
                 with suppress(PlaywrightTimeoutError):
                     page.wait_for_load_state("domcontentloaded", timeout=10000)
                 page.wait_for_timeout(1500)
@@ -153,9 +183,7 @@ class VisibleBrowser:
                         "Browser.setWindowBounds",
                         {"windowId": window["windowId"], "bounds": {"windowState": "normal"}},
                     )
-                if not self.update(
-                    doi=doi, rank=rank, mode=mode, stage="页面已打开", page=page
-                ):
+                if not self.update(doi=doi, rank=rank, mode=mode, stage="页面已打开", page=page):
                     events.append("status_panel_unavailable")
                 events.append("article_page_opened")
                 return DisplayResult("visible", page.url, ";".join(events))
@@ -172,9 +200,7 @@ class VisibleBrowser:
                 return DisplayResult(
                     "browser_display_unavailable", restarted.final_url or target, restarted.status
                 )
-            result = self.show(
-                doi=doi, rank=rank, mode=mode, _reconnect_attempted=True
-            )
+            result = self.show(doi=doi, rank=rank, mode=mode, _reconnect_attempted=True)
             if result.status == "visible":
                 return DisplayResult(
                     result.status, result.url, f"browser_reconnected;{result.event}"

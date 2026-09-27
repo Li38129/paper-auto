@@ -414,10 +414,16 @@ function updateSupplementSheet(workbook, results) {
       rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "unconfirmed", "", "", "", "", "", "", "", result.failure_reason || ""]);
     }
     for (const file of files) {
-      const attempt = attempts.find((item) => item.url === file.url || item.final_url === file.url);
+      const attempt = attempts.find((item) => item.success && (item.url === file.url || item.final_url === file.url));
       rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "", file.name || "", file.url || "", file.path || "", file.content_type || "", file.bytes_written || "", file.sha256 || "", attempt?.reason || "downloaded", ""]);
     }
-    for (const attempt of attempts.filter((item) => !item.success)) {
+    const successfulUrls = new Set(files.map((file) => file.url));
+    for (const attempt of attempts.filter((item) => item.success)) {
+      successfulUrls.add(attempt.url);
+      successfulUrls.add(attempt.final_url);
+    }
+    const finalAttempts = new Map(attempts.map((attempt) => [attempt.url, attempt]));
+    for (const attempt of [...finalAttempts.values()].filter((item) => !item.success && !successfulUrls.has(item.url))) {
       rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "", "", attempt.url || "", "", "", "", "", "failed", attempt.reason || "failed"]);
     }
   }

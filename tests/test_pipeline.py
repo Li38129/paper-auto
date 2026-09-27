@@ -358,7 +358,7 @@ def test_pipeline_does_not_call_supplement_downloader_by_default(
 
     monkeypatch.setattr(
         supplements,
-        "BrowserSupplementDownloader",
+        "HttpSupplementDownloader",
         UnexpectedSupplementDownloader,
     )
     harvester = Harvester(

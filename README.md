@@ -11,14 +11,14 @@
 - Elsevier 使用 `view=FULL → MAIN object EID → PDF`，凭据由当前 Windows 用户的 DPAPI 加密；
 - 内置 21 家出版社 Profile，并明确区分 API、HTTP、浏览器已验证和仅配置状态；
 - SQLite 任务支持后台执行、心跳、stalled 检测、恢复、取消和阶段日志；
-- 后台任务保存限速、浏览器和工作簿参数，每 100 条以内建立检查点并自动回写 Excel；
+- 所有下载入口自动创建可恢复任务，逐篇保存数据库检查点，按批次同步报告和 Excel；
 - 本机机构访问策略支持按 ISSN、期刊名和年份跳过付费入口，同时保留 OA 获取；
 - 可选 MCP 提供 `search`、`download`、`job_status`、`update_excel` 四个工具；
 - 支持 Springer 与 ACS 的稳定正文 URL 规则；
 - 对 HTTP 200 的 HTML 登录页、验证码页等伪 PDF 做魔数与最小尺寸校验；
 - 使用 `.part` 临时文件和原子替换，失败不会留下损坏 PDF；
 - 默认只保存正文 `article.pdf`，不在论文目录附加清单；
-- 前台下载仅在指定 `--report-dir` 时保存报告；后台任务自动在任务目录保存报告；
+- 前台和后台任务默认在 `temp/doi-harvester/jobs/<job_id>` 保存报告；`--report-dir` 可指定报告目录；
 - 内置 `$autopaper-literature` 仓库 Skill，持续维护 Excel 文献清单并把正文写入稳定编号目录；
 - 可读取 Skill 生成的 `papers.json`，把正文直接写入既有编号目录；
 - 可选 Playwright + Chrome/Edge 持久化会话，复用用户本人已有机构权限。
@@ -161,7 +161,7 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 服务器提供：
 
 - `search(query, year_from, year_to, limit)`：OpenAlex 主检索、Crossref 补充并去重；
-- `download(papers_file, output_dir, report_dir, browser_fallback, detach)`：创建任务并返回 `job_id`；
+- `download(papers_file, output_dir, report_dir, browser_fallback, detach, supplements, supplements_only, browser_display)`：创建任务并返回 `job_id`；
 - `job_status(job_id)`：返回状态、计数和需要人工处理的 DOI；
 - `update_excel(workbook_path, records_path, report_path, resolved_path)`：复用仓库 Skill 的工作簿脚本。
 
@@ -296,3 +296,14 @@ temp/               被 Git 忽略的运行环境、缓存、交换文件和临�
 ```
 
 长期成果只放在用户指定的论文根目录；项目根目录只保留源码和维护文件。升级前版本使用的 `tmp\doi-harvester` 会在新版启动器首次运行且 `temp\doi-harvester` 尚不存在时自动迁移。旧虚拟环境因包含绝对路径会被转存到 `temp\work` 等待清理，随后由 `uv` 在新位置自动重建；任务报告和浏览器会话会继续保留。
+
+
+## 统一检查点与附件回退
+
+CLI 的 `--doi`、`--doi-file`、`--papers-file` 在正文、仅 SI、正文加 SI 三种模式下均先创建任务，打印任务 ID，再在当前终端执行；`--detach` 仅将同一任务交给 Broker。所有模式禁止 `--overwrite`，有效缓存按现有规则复用。单 DOI/DOI 列表沿用 DOI 目录名，`papers.json` 保留原编号和指定绝对目录。
+
+每篇开始前持久化运行状态，结束后保存结果。报告、SI CSV 和可选 Excel 按 `--batch-size` 同步（默认 100），并在暂停、失败和结束时同步。终端 Ctrl+C 保留任务和报告；使用 `jobs status <job_id>` 检查，再用 `jobs resume <job_id>` 恢复，后台恢复需加 `--detach`。强制结束进程后先等待任务被识别为 stalled，再恢复原 ID。旧任务缺少 SI 参数时仍为正文模式，目录映射不变。
+
+SI 统一由 `HttpSupplementDownloader` 获取。浏览器发现附件链接后先走 HTTP 流式下载，失败附件再使用已有浏览器会话；逐次尝试保留在 JSON，CSV/Excel 只汇总附件最终结果。`Failed to fetch` 只记录为浏览器传输错误，不能单独确定为 CORS。登录或验证失败保留授权等待，不判为无 SI。
+
+浏览器页面 DOI 从元数据和 DOI URL 路径规范化后完整比较；截断 DOI 或相互冲突的元数据不匹配。ScienceDirect PII 页面须有对应 DOI 元数据，arXiv 保留完整编号检查。本次保持浏览器展示默认策略。
