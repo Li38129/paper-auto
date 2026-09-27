@@ -66,20 +66,20 @@
   --delay 1
 ```
 
-默认使用前台监督模式。可见下载遇到验证页时保持普通 Chrome/Edge 和当前工作标签，验证完成前不得切换下一篇；模型每次等待不超过 60 秒，并在状态变化、完成或需要人工操作时及时汇报。任务较多且用户明确要求后台运行时才增加 `--detach`，并同时传入 `--workbook`、`--node-path`、`--node-modules`，由后台任务每批自动回写 Excel。后台任务遇验证时进入 `waiting_for_user` 并保留后续条目；完成授权后使用 `jobs resume <job_id>` 前台恢复，需要继续后台运行时显式增加 `--detach`。不得重建编号目录或重新编号。
+默认使用前台监督模式。按已确认的验证策略处理：pause 保持 Chrome/Edge 当前工作标签，验证完成前不切换下一篇；skip 记录当前篇人工验证跳过并继续。模型每次等待不超过 60 秒，并在状态变化、完成或需要人工操作时及时汇报。任务较多且用户明确要求后台运行时才增加 `--detach`，并同时传入 `--workbook`、`--node-path`、`--node-modules`，由后台任务每批自动回写 Excel。pause 任务遇验证时进入 `waiting_for_user` 并保留后续条目；skip 任务记录 `auth_skipped` 后继续；完成授权后使用 `jobs resume <job_id>` 前台恢复，需要继续后台运行时显式增加 `--detach`。不得重建编号目录或重新编号。
 
 如果 AutoPaper MCP 已注册，可用 `download` 创建相同任务，并用 `job_status` 等待终态。`papers_file`、`output_dir` 和可选 `report_dir` 必须是绝对路径；`report_dir` 只能位于 `<项目根目录>\temp\doi-harvester\jobs`。
 
-默认不要传 `--supplements`。集中报告只能写到任务目录，不得写进论文根目录或编号目录。命令结束后先按 [Excel 汇总规则](workbook.md) 回写报告，再判断重试与清理。
+按本次三项确认的下载模式传参；仅正文不传 SI 参数。集中报告只能写到任务目录，不得写进论文根目录或编号目录。命令结束后先按 [Excel 汇总规则](workbook.md) 回写报告，再判断重试与清理。
 
-需要补充材料时，`--supplements` 同时下载正文和 SI；`--supplements-only` 仅下载 SI，两者互斥。正文及两种 SI 模式均自动创建可恢复任务；`--doi`、`--doi-file`、`--papers-file` 共用任务执行器。所有模式禁止 `--overwrite`。SI 可为 PDF、Office 文档、表格、压缩包、视频或出版社提供的其他原始格式，保存在每篇目录的 `supplements` 子目录。`--results-csv` 指定逐附件结果清单，建议位于论文根目录。固定编号 CSV 可先运行 `scripts/si-csv-batch.py --csv ... --start ... --end ... --output-dir ... --job-dir ... --node ... --node-modules ...`；脚本先将原编号写入 Excel，随后生成 `papers.json` 和目标 CSV。无效或占位 DOI 保留为待核验记录，不进入下载器，也不能阻断其他有效 DOI。SI-only 的报告只更新工作簿“补充材料”页，不改正文下载字段。不同出版社的补充材料链接结构可能不同；链接未能确认、页面访问失败、验证页或解析失败均须保留为未解决状态，只有页面证据明确时才记录“无补充材料”。出版社要求验证时保留任务与页面，人工完成后使用 `jobs resume <job_id>` 沿用断点。
+需要补充材料时，`--supplements` 同时下载正文和 SI；`--supplements-only` 仅下载 SI，两者互斥。正文及两种 SI 模式均自动创建可恢复任务；`--doi`、`--doi-file`、`--papers-file` 共用任务执行器。所有模式禁止 `--overwrite`。SI 可为 PDF、Office 文档、表格、压缩包、视频或出版社提供的其他原始格式，保存在每篇目录的 `supplements` 子目录。`--results-csv` 指定逐附件结果清单，建议位于论文根目录。固定编号 CSV 可先运行 `scripts/si-csv-batch.py --csv ... --start ... --end ... --output-dir ... --job-dir ... --node ... --node-modules ...`；脚本先将原编号写入 Excel，随后生成 `papers.json` 和目标 CSV。无效或占位 DOI 保留为待核验记录，不进入下载器，也不能阻断其他有效 DOI。SI-only 的报告只更新工作簿“补充材料”页，不改正文下载字段。不同出版社的补充材料链接结构可能不同；链接未能确认、页面访问失败、验证页或解析失败均须保留为未解决状态，只有页面证据明确时才记录“无补充材料”。出版社要求验证时按已确认策略跳过或暂停；暂停后人工完成验证，再使用 `jobs resume <job_id>` 沿用断点。
 
 ## 状态判断与一次重试
 
 - `subscription_required`：机构没有正文权限，作为最终失败，不重试。
 - `policy_skipped`：已先尝试 OA，随后按本机期刊权限规则跳过付费入口。
 - 普通失败：保留任务目录并报告，不循环重试。
-- `challenge_required` 或 `authentication_required`：保持当前页面并等待人工操作；后台进入 `waiting_for_user`，人工授权后恢复。后续出现新的独立验证时允许再次恢复。
+- `challenge_required` 或 `authentication_required`：按已确认策略处理；pause 保留当前页面并进入 `waiting_for_user`，人工授权后恢复；skip 标记 `auth_skipped` 后继续，不自动重试。
 
 ACS、Elsevier 或 RSC 授权命令：
 
@@ -120,3 +120,6 @@ Elsevier 浏览器授权示例：
 
 
 每篇开始前和完成后分别持久化状态及结果，报告/CSV/Excel 按 `--batch-size` 同步，默认 100。报告未指定时放在 `temp/doi-harvester/jobs/<job_id>`；Ctrl+C 保留任务并同步报告，恢复时继续使用原任务 ID。浏览器发现附件后先走 HTTP，失败附件才回退浏览器；以最终结果验收，不把回退过程中的失败另计为失败附件。DOI 页面核验使用完整规范化 DOI，相互冲突或缺少证据时不复用页面。
+
+
+每个新下载目标先在 Skill 对话中确认保存绝对路径、下载内容、人工验证策略，再进行 Excel 写入、建目录及下载。请求已含设置时也汇总确认一次；同一目标子批次和恢复不重复询问。CLI 显式传入 `--challenge-policy pause|skip`；MCP `download` 使用 `challenge_policy`（默认 pause，保留 fail-fast 兼容）。人工验证跳过记录 `auth_skipped`，普通恢复不自动重试，最终交付必须报告跳过数，不得把队列 completed 等同于全部下载成功。该规则不允许跳过浏览器连接或 DOI 核验错误。

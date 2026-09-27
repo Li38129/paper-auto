@@ -40,8 +40,11 @@ context.updateSupplementSheet(workbook, [{download_mode: 'supplements_only',
   {url: 'https://cdn/good', success: true, reason: 'downloaded'},
   {url: 'https://cdn/bad', success: false, reason: 'http_500'},
   {url: 'https://cdn/bad', success: false, reason: 'Failed to fetch'}
-]}]);
-assert.strictEqual(rows.length, 3);
+]}, {download_mode: 'supplements_only', rank: 302, doi: '10.1000/skipped',
+  status: 'auth_skipped', supplement_status: 'authentication_required',
+  failure_reason: 'authentication_required'}]);
+assert.strictEqual(rows.length, 4);
+assert.strictEqual(rows.find(r => r[0] === 302)[2], 'auth_skipped');
 assert.strictEqual(rows.filter(r => r[9] === 'failed').length, 1);
 assert.strictEqual(rows.find(r => r[3] === 'si.docx')[9], 'downloaded');
 assert.strictEqual(rows.find(r => r[9] === 'failed')[10], 'Failed to fetch');

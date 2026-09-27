@@ -161,7 +161,7 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 服务器提供：
 
 - `search(query, year_from, year_to, limit)`：OpenAlex 主检索、Crossref 补充并去重；
-- `download(papers_file, output_dir, report_dir, browser_fallback, detach, supplements, supplements_only, browser_display)`：创建任务并返回 `job_id`；
+- `download(papers_file, output_dir, report_dir, browser_fallback, detach, supplements, supplements_only, browser_display, challenge_policy)`：创建任务并返回 `job_id`；
 - `job_status(job_id)`：返回状态、计数和需要人工处理的 DOI；
 - `update_excel(workbook_path, records_path, report_path, resolved_path)`：复用仓库 Skill 的工作簿脚本。
 
@@ -307,3 +307,10 @@ CLI 的 `--doi`、`--doi-file`、`--papers-file` 在正文、仅 SI、正文加 
 SI 统一由 `HttpSupplementDownloader` 获取。浏览器发现附件链接后先走 HTTP 流式下载，失败附件再使用已有浏览器会话；逐次尝试保留在 JSON，CSV/Excel 只汇总附件最终结果。`Failed to fetch` 只记录为浏览器传输错误，不能单独确定为 CORS。登录或验证失败保留授权等待，不判为无 SI。
 
 浏览器页面 DOI 从元数据和 DOI URL 路径规范化后完整比较；截断 DOI 或相互冲突的元数据不匹配。ScienceDirect PII 页面须有对应 DOI 元数据，arXiv 保留完整编号检查。本次保持浏览器展示默认策略。
+
+
+## 新下载任务的三项确认
+
+通过 `autopaper-literature` 开始每个新下载目标时，即使请求已提供设置，也先在对话中确认：保存绝对路径、仅正文/仅 SI/正文加 SI、遇人工验证跳过/暂停。三项确认完成前不写 Excel、不建论文目录、不下载；同一目标内部子批次、验证后继续和断点恢复沿用原设置。CLI/MCP 不额外弹问，接收确认后的显式参数。
+
+CLI `--challenge-policy skip` 在确认的验证/登录页面结束当前篇处理，以 `auth_skipped` 保存原因、页面和已有文件，按原限速继续下一篇；`pause` 暂停为 `waiting_for_user`。MCP 增加 `challenge_policy` 参数，默认 pause，保留 fail-fast 兼容。skip 不覆盖浏览器连接及 DOI 核验错误，也不被等待时长选项改成 pause。跳过条目普通恢复不重新入队；任务 completed 表示队列处理完毕，报告仍须区分成功、人工验证跳过和其他失败。

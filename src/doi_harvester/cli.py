@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--challenge-policy",
         choices=["pause", "skip", "fail-fast"],
-        help="验证页处理策略；可见浏览器默认 pause，无头模式默认 skip。",
+        help="验证页策略：pause 暂停等待，skip 跳过当前篇继续；保留 fail-fast。",
     )
     download.add_argument(
         "--challenge-timeout",

@@ -343,8 +343,7 @@ def test_browser_discovery_reuses_verified_page_and_downloads_via_http(monkeypat
 
         def content(self):
             return (
-                '<a href="https://cdn.test/supporting-information.csv">'
-                'Supporting Information</a>'
+                '<a href="https://cdn.test/supporting-information.csv">Supporting Information</a>'
             )
 
     page = Page()
@@ -376,3 +375,39 @@ def test_browser_discovery_reuses_verified_page_and_downloads_via_http(monkeypat
     )
     assert status == "downloaded" and len(files) == 1
     assert attempts[0].source == "supplement:http"
+
+
+def test_browser_gate_stops_remaining_attachment_requests(tmp_path):
+    class Page(StreamPage):
+        def evaluate(self, *_args):
+            self.calls += 1
+            return {"status": 403}
+
+    page = Page()
+    status, files, _ = HttpSupplementDownloader()._download_browser_urls(
+        page, ["https://cdn.test/one.docx", "https://cdn.test/two.docx"], tmp_path
+    )
+    assert status == "challenge_required" and not files
+    assert page.calls == 1
+
+
+def test_http_gate_preserves_files_and_stops_remaining_requests(tmp_path):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def get(url, **_):
+        calls.append(url)
+        return StreamResponse(url, status=403 if "gate" in url else 200)
+
+    urls = [
+        "https://cdn.test/good.csv",
+        "https://cdn.test/gate.csv",
+        "https://cdn.test/untouched.csv",
+    ]
+    status, files, _ = HttpSupplementDownloader()._download_urls(
+        SimpleNamespace(get=get), urls, tmp_path
+    )
+    assert status == "challenge_required" and len(files) == 1
+    assert calls == urls[:2]
+    assert Path(files[0].path).read_bytes() == b"a,b\n1,2"

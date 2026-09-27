@@ -44,7 +44,10 @@ def download(
     supplements: bool = False,
     supplements_only: bool = False,
     browser_display: str = "foreground",
+    challenge_policy: str = "pause",
 ) -> dict[str, object]:
+    if challenge_policy not in {"pause", "skip", "fail-fast"}:
+        raise ValueError("challenge_policy 必须为 pause、skip 或 fail-fast。")
     if supplements and supplements_only:
         raise ValueError("supplements 与 supplements_only 不能同时开启。")
     if browser_display not in {"foreground", "off"}:
@@ -82,9 +85,9 @@ def download(
         browser_fallback=browser_fallback,
         profile_dir=profile_dir,
         options={
-            "challenge_policy": "pause",
+            "challenge_policy": challenge_policy,
             "challenge_timeout_seconds": 600.0,
-            "keep_browser_open": True,
+            "keep_browser_open": challenge_policy == "pause",
             "supplements": supplements,
             "supplements_only": supplements_only,
             "browser_display": browser_display,

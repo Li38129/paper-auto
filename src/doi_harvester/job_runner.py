@@ -58,6 +58,7 @@ def _write_report(store: JobStore, job_id: str) -> None:
         "schema_version": 1,
         "job_id": job_id,
         "status": job["status"],
+        "counts": job["counts"],
         "generated_at": datetime.now(UTC).isoformat(),
         "results": [
             {
@@ -119,7 +120,9 @@ def _write_supplement_results_csv(items: list[dict[str, object]], destination: P
         base = {
             "序号": item["rank"],
             "DOI": item["doi"],
-            "SI状态": "pending"
+            "SI状态": "auth_skipped"
+            if item["status"] == "auth_skipped"
+            else "pending"
             if item["status"] == "pending"
             else item.get("supplement_status") or "pending",
         }
@@ -309,6 +312,13 @@ def run_job(
                     reason=f"{type(exc).__name__}: {exc}",
                     outcome="blocked",
                 )
+            reason = result.reason or result.status
+            auth_required = reason.startswith(("challenge_required", "authentication_required"))
+            auth_skipped = auth_required and options.get("challenge_policy", "pause") == "skip"
+            if auth_skipped:
+                result.reason = reason
+                result.success = False
+                result.status = "auth_skipped"
             active_store.record_result(job_id, doi, result)
             display_attempt = next(
                 (attempt for attempt in result.attempts if attempt.source == "browser_display"),
@@ -318,28 +328,30 @@ def run_job(
                 active_store.set_event(job_id, f"browser_display:{doi}:{display_attempt.reason}")
             active_store.heartbeat(job_id)
             processed_since_sync += 1
-            reason = result.reason or result.status
             current = active_store.get_job(job_id, detect_stalled=False)
-            marker = "成功" if result.success else "未完成"
+            marker = "人工验证跳过" if auth_skipped else "成功" if result.success else "未完成"
             print(
                 f"[{marker}] DOI：{doi}；状态：{result.status}；计数：{current['counts']}",
                 flush=True,
             )
-            if reason.startswith(("challenge_required", "authentication_required")):
+            if auth_required:
                 final_url = next(
                     (
                         attempt.final_url or attempt.url
-                        for attempt in reversed(result.attempts)
+                        for attempt in reversed([*result.attempts, *result.supplement_attempts])
                         if attempt.final_url or attempt.url
                     ),
                     f"https://doi.org/{doi}",
                 )
-                active_store.set_event(job_id, f"authentication_required:{doi}:{final_url}")
+                event = "auth_skipped" if auth_skipped else "authentication_required"
+                active_store.set_event(job_id, f"{event}:{doi}:{final_url}")
+                label = "跳过人工验证" if auth_skipped else "需要人工验证"
                 print(
-                    f"需要人工验证：DOI {doi}；页面：{final_url}",
+                    f"{label}：DOI {doi}；页面：{final_url}",
                     flush=True,
                 )
-                break
+                if not auth_skipped:
+                    break
             if _is_recoverable_browser_error(reason):
                 active_store.set_event(job_id, f"browser_recoverable_error:{doi}:{reason}")
                 print(

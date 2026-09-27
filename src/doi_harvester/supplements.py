@@ -293,7 +293,7 @@ class HttpSupplementDownloader:
                     )
                 if not _is_current_article_page(page, doi):
                     return (
-                        "unconfirmed",
+                        "browser_publisher_unavailable",
                         [],
                         [
                             Attempt(
@@ -352,6 +352,8 @@ class HttpSupplementDownloader:
                     status = browser_status
             artifacts.extend(files)
             final_statuses.append(status)
+            if status == "challenge_required":
+                break
         if any(status == "challenge_required" for status in final_statuses):
             return "challenge_required", artifacts, attempts
         if any(status not in {"downloaded", "cached"} for status in final_statuses):
@@ -486,6 +488,8 @@ class HttpSupplementDownloader:
                         final_url=response.get("finalUrl"),
                     )
                 )
+                if response.get("status") in {401, 403, 429}:
+                    break
             finally:
                 if temporary:
                     temporary.unlink(missing_ok=True)
@@ -527,7 +531,7 @@ class HttpSupplementDownloader:
                                 status_code=response.status_code,
                             )
                         )
-                        continue
+                        return "challenge_required", artifacts, attempts
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                     name = _supplement_filename(

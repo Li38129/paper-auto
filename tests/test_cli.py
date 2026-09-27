@@ -503,7 +503,10 @@ def test_elsevier_setup_explains_api_configuration_error(
 @pytest.mark.parametrize("mode", [[], ["--supplements"], ["--supplements-only"]])
 @pytest.mark.parametrize("entry", ["doi", "doi-file", "papers-file"])
 @pytest.mark.parametrize("detach", [False, True])
-def test_all_inputs_and_modes_create_checkpoint_task(monkeypatch, tmp_path, mode, entry, detach):
+@pytest.mark.parametrize("policy", ["pause", "skip"])
+def test_all_inputs_and_modes_create_checkpoint_task(
+    monkeypatch, tmp_path, mode, entry, detach, policy
+):
     from doi_harvester.job_store import JobStore
 
     captured = {}
@@ -516,7 +519,14 @@ def test_all_inputs_and_modes_create_checkpoint_task(monkeypatch, tmp_path, mode
     monkeypatch.setattr(cli, "run_job", execute)
     monkeypatch.setattr(cli.BrokerManager, "ensure_started", lambda self: 123)
     folder = tmp_path / "0420 Paper"
-    args = ["download", "--output-dir", str(tmp_path / "papers"), *mode]
+    args = [
+        "download",
+        "--output-dir",
+        str(tmp_path / "papers"),
+        "--challenge-policy",
+        policy,
+        *mode,
+    ]
     if entry == "doi":
         args += ["--doi", "10.1000/example"]
     elif entry == "doi-file":
@@ -553,6 +563,7 @@ def test_all_inputs_and_modes_create_checkpoint_task(monkeypatch, tmp_path, mode
     assert options["supplements"] == (mode == ["--supplements"])
     assert options["supplements_only"] == (mode == ["--supplements-only"])
     assert options["browser_display"] == "foreground"
+    assert options["challenge_policy"] == policy
     assert job["batch_size"] == 100
     assert Path(job["report_dir"]) == tmp_path / "runtime" / "jobs" / job["id"]
     items = store.get_job(job["id"])["items"]

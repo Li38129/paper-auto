@@ -758,8 +758,7 @@ class BrowserPdfDownloader:
         self.challenge_policy = challenge_policy
         self.challenge_timeout_seconds = max(challenge_timeout_seconds, 0.0)
         self.keep_browser_open = keep_browser_open
-        if self.interactive_wait_seconds > 0:
-            self.challenge_policy = "pause"
+        if self.interactive_wait_seconds > 0 and self.challenge_policy == "pause":
             self.challenge_timeout_seconds = self.interactive_wait_seconds
 
     def download(

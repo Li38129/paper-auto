@@ -408,14 +408,15 @@ function updateSupplementSheet(workbook, results) {
   const retained = oldValues.filter((row) => (cleanText(row[1]) || cleanText(row[0])) && !dois.has(normalizeDoi(row[1])));
   const rows = [...retained];
   for (const result of relevant) {
+    const siStatus = result.status === "auth_skipped" ? "auth_skipped" : result.supplement_status;
     const files = Array.isArray(result.supplements) ? result.supplements : [];
     const attempts = Array.isArray(result.supplement_attempts) ? result.supplement_attempts : [];
     if (!files.length && !attempts.length) {
-      rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "unconfirmed", "", "", "", "", "", "", "", result.failure_reason || ""]);
+      rows.push([result.rank || "", normalizeDoi(result.doi), siStatus || "unconfirmed", "", "", "", "", "", "", "", result.failure_reason || ""]);
     }
     for (const file of files) {
       const attempt = attempts.find((item) => item.success && (item.url === file.url || item.final_url === file.url));
-      rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "", file.name || "", file.url || "", file.path || "", file.content_type || "", file.bytes_written || "", file.sha256 || "", attempt?.reason || "downloaded", ""]);
+      rows.push([result.rank || "", normalizeDoi(result.doi), siStatus || "", file.name || "", file.url || "", file.path || "", file.content_type || "", file.bytes_written || "", file.sha256 || "", attempt?.reason || "downloaded", ""]);
     }
     const successfulUrls = new Set(files.map((file) => file.url));
     for (const attempt of attempts.filter((item) => item.success)) {
@@ -424,7 +425,7 @@ function updateSupplementSheet(workbook, results) {
     }
     const finalAttempts = new Map(attempts.map((attempt) => [attempt.url, attempt]));
     for (const attempt of [...finalAttempts.values()].filter((item) => !item.success && !successfulUrls.has(item.url))) {
-      rows.push([result.rank || "", normalizeDoi(result.doi), result.supplement_status || "", "", attempt.url || "", "", "", "", "", "failed", attempt.reason || "failed"]);
+      rows.push([result.rank || "", normalizeDoi(result.doi), siStatus || "", "", attempt.url || "", "", "", "", "", "failed", attempt.reason || "failed"]);
     }
   }
   rows.sort((left, right) => Number(left[0]) - Number(right[0]) || String(left[3]).localeCompare(String(right[3])));

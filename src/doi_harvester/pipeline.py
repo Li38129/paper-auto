@@ -383,6 +383,10 @@ class Harvester:
     def _add_supplements(self, result: DownloadResult) -> None:
         if not self.download_supplements:
             return
+        if (result.reason or result.status).startswith(
+            ("challenge_required", "authentication_required")
+        ):
+            return
         if self.visible_browser is not None:
             self.visible_browser.update(
                 doi=result.doi, rank=self.display_rank,

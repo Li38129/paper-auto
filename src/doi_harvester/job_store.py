@@ -36,6 +36,7 @@ ITEM_STATUSES = {
     "auth_required",
     "subscription_required",
     "policy_skipped",
+    "auth_skipped",
     "failed",
 }
 
@@ -489,6 +490,7 @@ class JobStore:
             "cached",
             "subscription_required",
             "policy_skipped",
+            "auth_skipped",
         }:
             status = "completed"
         elif counts.get("auth_required"):
@@ -583,6 +585,8 @@ class JobStore:
 
 
 def _item_status(result: DownloadResult) -> str:
+    if result.status == "auth_skipped":
+        return "auth_skipped"
     if result.success:
         return "cached" if result.status == "cached" else "downloaded"
     reason = result.reason or result.status

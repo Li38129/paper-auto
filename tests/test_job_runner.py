@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+import pytest
 
 from doi_harvester.job_runner import run_job
 from doi_harvester.job_store import JobStore
@@ -293,3 +296,175 @@ def test_old_task_defaults_to_article_mode(monkeypatch, tmp_path):
     assert captured["download_supplements"] is False
     assert captured["supplements_only"] is False
     assert captured["browser_display"] == "foreground"
+
+
+@pytest.mark.parametrize("policy", ["pause", "skip"])
+@pytest.mark.parametrize("stage", ["browser_display", "browser_fallback", "supplement:browser"])
+@pytest.mark.parametrize("gate", ["challenge_required", "authentication_required"])
+@pytest.mark.parametrize("mode", [{}, {"supplements": True}, {"supplements_only": True}])
+def test_authorization_policy_at_each_download_stage(tmp_path, policy, stage, gate, mode):
+    from doi_harvester.models import Attempt, SupplementArtifact
+
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {
+                "rank": i,
+                "doi": f"10.1000/{i}",
+                "title": str(i),
+                "folder_path": str(tmp_path / str(i)),
+            }
+            for i in (1, 2)
+        ],
+        output_dir=tmp_path,
+        report_dir=tmp_path / "report",
+        browser_fallback=True,
+        options={**mode, "challenge_policy": policy, "results_csv": str(tmp_path / "si.csv")},
+    )
+    calls = []
+    saved = tmp_path / "saved.csv"
+    saved.write_bytes(b"a,b\n1,2")
+    artifact = SupplementArtifact(
+        name="saved.csv",
+        path=str(saved),
+        url="https://cdn.test/saved.csv",
+        content_type="text/csv",
+        bytes_written=7,
+        sha256="saved-hash",
+    )
+
+    class Worker:
+        def download(self, doi, *, article_dir):
+            calls.append(doi)
+            if doi.endswith("2"):
+                return DownloadResult(
+                    doi=doi, success=True, status="cached", article_dir=article_dir
+                )
+            attempt = Attempt(
+                source=stage, url="https://publisher.test/verification", success=False, reason=gate
+            )
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status=gate,
+                article_dir=article_dir,
+                supplements=[artifact] if stage == "supplement:browser" else [],
+                supplement_status=gate if stage == "supplement:browser" else "not_requested",
+                supplement_attempts=[attempt] if stage == "supplement:browser" else [],
+                attempts=[] if stage == "supplement:browser" else [attempt],
+            )
+
+    status = run_job(job_id, store=store, harvester=Worker())
+    job = store.get_job(job_id)
+    first = job["items"][0]
+    assert status == ("completed" if policy == "skip" else "waiting_for_user")
+    assert calls == (["10.1000/1", "10.1000/2"] if policy == "skip" else ["10.1000/1"])
+    assert first["status"] == ("auth_skipped" if policy == "skip" else "auth_required")
+    assert first["failure_reason"] == gate
+    if mode:
+        import csv
+
+        with (tmp_path / "si.csv").open(encoding="utf-8-sig", newline="") as handle:
+            rows = [row for row in csv.DictReader(handle) if row["DOI"] == "10.1000/1"]
+        assert rows
+        if policy == "skip":
+            assert all(row["SI状态"] == "auth_skipped" for row in rows)
+    assert saved.read_bytes() == b"a,b\n1,2"
+    if stage == "supplement:browser":
+        assert first["supplements"][0]["sha256"] == "saved-hash"
+    report = json.loads((tmp_path / "report" / "batch-report.json").read_text(encoding="utf-8"))
+    assert report["results"][0]["success"] is False
+    assert report["results"][0]["status"] == first["status"]
+    if policy == "skip":
+        with pytest.raises(ValueError, match="没有可恢复"):
+            store.prepare_resume(job_id)
+
+
+def test_auth_skipped_is_not_requeued_with_pending_items(tmp_path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {"doi": f"10.1000/{i}", "title": str(i), "folder_path": str(tmp_path / str(i))}
+            for i in (1, 2)
+        ],
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=False,
+    )
+    store.record_result(
+        job_id,
+        "10.1000/1",
+        DownloadResult(
+            doi="10.1000/1",
+            success=False,
+            status="auth_skipped",
+            reason="authentication_required",
+            article_dir=tmp_path,
+        ),
+    )
+    store.set_job_status(job_id, "needs_attention")
+    store.prepare_resume(job_id, retry_failed=True)
+    assert [item["doi"] for item in store.pending_items(job_id)] == ["10.1000/2"]
+
+
+def test_skip_policy_does_not_hide_doi_confirmation_failure(tmp_path):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {"doi": f"10.1000/{i}", "title": str(i), "folder_path": str(tmp_path / str(i))}
+            for i in (1, 2)
+        ],
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=True,
+        options={"challenge_policy": "skip"},
+    )
+    calls = []
+
+    class Worker:
+        def download(self, doi, *, article_dir):
+            calls.append(doi)
+            return DownloadResult(
+                doi=doi,
+                success=False,
+                status="browser_publisher_unavailable",
+                article_dir=article_dir,
+            )
+
+    assert run_job(job_id, store=store, harvester=Worker()) == "needs_attention"
+    assert calls == ["10.1000/1"]
+    assert store.get_job(job_id)["counts"] == {"retryable": 1, "pending": 1}
+
+
+def test_skip_keeps_delay_and_batch_checkpoints(monkeypatch, tmp_path):
+    from doi_harvester import job_runner
+
+    calls, delays, syncs = [], [], []
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=[
+            {"doi": f"10.1000/{i}", "title": str(i), "folder_path": str(tmp_path / str(i))}
+            for i in (1, 2)
+        ],
+        output_dir=tmp_path,
+        report_dir=tmp_path / "report",
+        browser_fallback=False,
+        options={"challenge_policy": "skip", "delay_seconds": 1.5},
+        batch_size=1,
+    )
+    monkeypatch.setattr(job_runner.time, "sleep", lambda seconds: delays.append(seconds))
+    monkeypatch.setattr(job_runner, "_sync_excel", lambda *_: syncs.append(True) or True)
+
+    class Worker:
+        def download(self, doi, *, article_dir):
+            calls.append(doi)
+            return DownloadResult(
+                doi=doi, success=False, status="challenge_required", article_dir=article_dir
+            )
+
+    assert run_job(job_id, store=store, harvester=Worker()) == "completed"
+    assert len(calls) == 2 and delays == [1.5]
+    assert len(syncs) == 3
+    report = json.loads((tmp_path / "report" / "batch-report.json").read_text(encoding="utf-8"))
+    assert report["counts"] == {"auth_skipped": 2}
+    assert not any(item["success"] for item in report["results"])

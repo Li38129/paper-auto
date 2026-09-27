@@ -374,3 +374,20 @@ def test_pipeline_does_not_call_supplement_downloader_by_default(
     assert result.success is True
     assert result.supplement_status == "not_requested"
     assert not (result.article_dir / "supplements").exists()
+
+
+def test_body_authorization_gate_does_not_start_supplement_request(monkeypatch, tmp_path):
+    worker = Harvester.__new__(Harvester)
+    worker.download_supplements = True
+    result = DownloadResult(
+        doi="10.1000/example", success=False, status="authentication_required", article_dir=tmp_path
+    )
+
+    def forbidden_download(*_args, **_kwargs):
+        raise AssertionError("正文遇到验证后不应请求 SI")
+
+    monkeypatch.setattr(
+        "doi_harvester.supplements.HttpSupplementDownloader.download", forbidden_download
+    )
+    worker._add_supplements(result)
+    assert result.supplement_status == "not_requested"

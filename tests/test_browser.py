@@ -578,3 +578,10 @@ def test_browser_saves_pdf_from_new_viewer_tab(
 
     assert result.success is True
     assert destination.read_bytes() == body
+
+
+def test_explicit_skip_is_not_overridden_by_wait_options(tmp_path):
+    downloader = BrowserPdfDownloader(
+        profile_dir=tmp_path, challenge_policy="skip", interactive_wait_seconds=600
+    )
+    assert downloader.challenge_policy == "skip"

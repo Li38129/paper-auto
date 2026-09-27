@@ -28,7 +28,8 @@ def test_update_excel_protects_original_when_runtime_is_missing(
 
 @pytest.mark.parametrize("mode", [(False, False), (True, False), (False, True)])
 @pytest.mark.parametrize("detach", [False, True])
-def test_mcp_persists_download_mode_and_task(monkeypatch, tmp_path, mode, detach):
+@pytest.mark.parametrize("policy", ["pause", "skip"])
+def test_mcp_persists_download_mode_and_task(monkeypatch, tmp_path, mode, detach, policy):
     import json
 
     from doi_harvester import mcp_server
@@ -57,11 +58,26 @@ def test_mcp_persists_download_mode_and_task(monkeypatch, tmp_path, mode, detach
         encoding="utf-8",
     )
     result = mcp_server.download(
-        str(source), str(output), supplements=mode[0], supplements_only=mode[1], detach=detach
+        str(source),
+        str(output),
+        supplements=mode[0],
+        supplements_only=mode[1],
+        detach=detach,
+        challenge_policy=policy,
     )
     job = JobStore(runtime / "jobs" / "jobs.sqlite3").get_job(result["job_id"])
     options = json.loads(job["options_json"])
     assert (options["supplements"], options["supplements_only"]) == mode
     assert options["browser_display"] == "foreground"
+    assert options["challenge_policy"] == policy
     assert job["items"][0]["rank"] == 301
     assert result["status"] == ("queued" if detach else "completed")
+
+
+def test_mcp_rejects_invalid_verification_policy_before_task_creation(tmp_path, monkeypatch):
+    from doi_harvester.mcp_server import download
+
+    monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(tmp_path / "runtime"))
+    with pytest.raises(ValueError, match="challenge_policy"):
+        download("invalid.json", str(tmp_path), challenge_policy="unknown")
+    assert not (tmp_path / "runtime").exists()
