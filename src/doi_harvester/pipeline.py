@@ -8,9 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .access_policy import AccessPolicyStore
-from .config import ConfigError, ElsevierCredentials, load_elsevier_credentials
 from .doi import doi_slug, normalize_doi
-from .elsevier import ElsevierApiClient
 from .metadata import (
     CrossrefMetadataClient,
     MetadataError,
@@ -38,9 +36,8 @@ class Harvester:
         browser_options: dict[str, Any] | None = None,
         download_supplements: bool = False,
         supplements_only: bool = False,
+        supplement_urls: dict[str, list[str]] | None = None,
         browser_display: str = "off",
-        elsevier: ElsevierApiClient | None = None,
-        elsevier_credentials: ElsevierCredentials | None = None,
         access_store: AccessPolicyStore | None = None,
         ignore_access_policy: bool = False,
     ) -> None:
@@ -54,12 +51,13 @@ class Harvester:
             self.browser_options.setdefault("channel", "msedge")
         self.download_supplements = download_supplements
         self.supplements_only = supplements_only
+        self.supplement_urls = {
+            normalize_doi(doi): list(urls) for doi, urls in (supplement_urls or {}).items()
+        }
         self.browser_display = browser_display
         self.visible_browser = None
         self.display_rank: int | None = None
         self._last_display = None
-        self.elsevier = elsevier or ElsevierApiClient()
-        self.elsevier_credentials = elsevier_credentials
         self.access_store = access_store or AccessPolicyStore()
         self.ignore_access_policy = ignore_access_policy
 
@@ -88,23 +86,35 @@ class Harvester:
                     channel=self.browser_options.get("channel"),
                 )
             mode = (
-                "仅补充材料" if self.supplements_only
-                else "正文与补充材料" if self.download_supplements else "仅正文"
+                "仅补充材料"
+                if self.supplements_only
+                else "正文与补充材料"
+                if self.download_supplements
+                else "仅正文"
             )
             display = self.visible_browser.show(doi=doi, rank=self.display_rank, mode=mode)
             self._last_display = display
             if display.status != "visible":
                 return DownloadResult(
-                    doi=doi, success=False, status=display.status,
+                    doi=doi,
+                    success=False,
+                    status=display.status,
                     article_dir=article_dir,
                     reason=f"{display.status}:{display.event}",
-                    outcome=("auth_required" if display.status in {
-                        "challenge_required", "authentication_required"
-                    } else "blocked"),
-                    attempts=[Attempt(
-                        source="browser_display", url=display.url, success=False,
-                        reason=f"{display.status}:{display.event}", stage="browser_display",
-                    )],
+                    outcome=(
+                        "auth_required"
+                        if display.status in {"challenge_required", "authentication_required"}
+                        else "blocked"
+                    ),
+                    attempts=[
+                        Attempt(
+                            source="browser_display",
+                            url=display.url,
+                            success=False,
+                            reason=f"{display.status}:{display.event}",
+                            stage="browser_display",
+                        )
+                    ],
                 )
         pdf_path = article_dir / "article.pdf"
         article_dir.mkdir(parents=True, exist_ok=True)
@@ -140,7 +150,8 @@ class Harvester:
 
         if self.visible_browser is not None:
             self.visible_browser.update(
-                doi=doi, rank=self.display_rank,
+                doi=doi,
+                rank=self.display_rank,
                 mode="正文与补充材料" if self.download_supplements else "仅正文",
                 stage="获取正文",
             )
@@ -193,9 +204,6 @@ class Harvester:
             publisher=metadata.publisher,
             landing_url=metadata.landing_url,
         )
-        if not result.success and profile and profile.key == "elsevier":
-            self._download_elsevier(result, destination=pdf_path)
-
         if not result.success:
             self._download_candidates(
                 result,
@@ -238,20 +246,35 @@ class Harvester:
     def _display_result(self, result: DownloadResult) -> None:
         if self.visible_browser is not None:
             if self._last_display is not None:
-                result.attempts.insert(0, Attempt(
-                    source="browser_display", url=self._last_display.url,
-                    success=True, reason=self._last_display.event,
-                    stage="browser_display", final_url=self._last_display.url,
-                ))
+                result.attempts.insert(
+                    0,
+                    Attempt(
+                        source="browser_display",
+                        url=self._last_display.url,
+                        success=True,
+                        reason=self._last_display.event,
+                        stage="browser_display",
+                        final_url=self._last_display.url,
+                    ),
+                )
             mode = (
-                "仅补充材料" if self.supplements_only
-                else "正文与补充材料" if self.download_supplements else "仅正文"
+                "仅补充材料"
+                if self.supplements_only
+                else "正文与补充材料"
+                if self.download_supplements
+                else "仅正文"
             )
             self.visible_browser.update(
-                doi=result.doi, rank=self.display_rank, mode=mode,
-                stage=(f"正文:{result.status}；SI:{result.supplement_status}"
-                       if self.download_supplements and not self.supplements_only
-                       else result.supplement_status if self.supplements_only else result.status),
+                doi=result.doi,
+                rank=self.display_rank,
+                mode=mode,
+                stage=(
+                    f"正文:{result.status}；SI:{result.supplement_status}"
+                    if self.download_supplements and not self.supplements_only
+                    else result.supplement_status
+                    if self.supplements_only
+                    else result.status
+                ),
                 attachments=len(result.supplements),
             )
 
@@ -284,47 +307,6 @@ class Harvester:
                 result.source = candidate.source
                 return
 
-    def _download_elsevier(self, result: DownloadResult, *, destination: Path) -> None:
-        try:
-            credentials = self.elsevier_credentials or load_elsevier_credentials()
-        except ConfigError:
-            result.attempts.append(
-                Attempt(
-                    source="elsevier_api",
-                    url=f"https://doi.org/{result.doi}",
-                    success=False,
-                    reason="config_error",
-                    stage="publisher_api",
-                    provider="elsevier",
-                )
-            )
-            return
-        download = self.elsevier.download(
-            doi=result.doi,
-            destination=destination,
-            api_key=credentials.api_key,
-            inst_token=credentials.inst_token,
-            proxy_url=credentials.proxy_url,
-        )
-        result.attempts.extend(download.attempts)
-        result.warnings.extend(download.warnings)
-        if download.success:
-            result.success = True
-            result.status = "downloaded"
-            result.pdf_path = destination
-            result.source = download.source
-        elif not download.attempts:
-            result.attempts.append(
-                Attempt(
-                    source="elsevier_api",
-                    url=f"https://doi.org/{result.doi}",
-                    success=False,
-                    reason=download.reason,
-                    stage="publisher_api",
-                    provider="elsevier",
-                )
-            )
-
     @staticmethod
     def _classify_result(result: DownloadResult) -> None:
         if result.success:
@@ -336,27 +318,12 @@ class Harvester:
         reason = result.status or "failed"
         result.reason = reason
         result.quality = "none"
-        if reason in {
-            "api_key_missing",
-            "api_configuration_error",
-            "config_error",
-            "playwright_not_installed",
-        }:
+        if reason == "playwright_not_installed":
             result.outcome = "config_needed"
-            command = (
-                "doi-harvester elsevier-setup --set-key --validate"
-                if reason in {"api_key_missing", "api_configuration_error", "config_error"}
-                else "uv sync --extra browser"
-            )
-            message = (
-                "Elsevier 拒绝了当前开发者应用配置，请检查 API Key 的 Article Retrieval 权限。"
-                if reason == "api_configuration_error"
-                else "完成所需本地配置后重试。"
-            )
             result.next_action = NextAction(
                 kind="configure",
-                message=message,
-                command=command,
+                message="安装浏览器依赖后重试。",
+                command="uv sync --extra browser",
             )
         elif reason in {"challenge_required", "authentication_required"}:
             profile = infer_publisher_profile(result.doi, publisher=result.publisher)
@@ -391,7 +358,8 @@ class Harvester:
             return
         if self.visible_browser is not None:
             self.visible_browser.update(
-                doi=result.doi, rank=self.display_rank,
+                doi=result.doi,
+                rank=self.display_rank,
                 mode="仅补充材料" if self.supplements_only else "正文与补充材料",
                 stage="发现及下载 SI",
             )
@@ -405,6 +373,7 @@ class Harvester:
         status, artifacts, attempts = downloader.download(
             doi=result.doi,
             article_dir=result.article_dir,
+            explicit_urls=self.supplement_urls.get(result.doi),
         )
         result.supplement_status = status
         result.supplements = artifacts

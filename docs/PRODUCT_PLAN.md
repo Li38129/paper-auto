@@ -19,7 +19,7 @@
 
 ## 3. 分阶段范围
 
-### 阶段一：正文下载与 Elsevier P0（已实现）
+### 阶段一：正文下载（已实现）
 
 - DOI URL/裸 DOI 规范化、校验、去重；
 - Crossref 元数据与正文链接；
@@ -29,8 +29,6 @@
 - 本地 PDF 缓存和可选集中批次报告；
 - Playwright 持久化浏览器兜底；
 - 对安全验证、登录、无订阅权限分别给出状态。
-- Windows 当前用户 DPAPI 全局 Elsevier API 配置；
-- Elsevier FULL XML、正文 EID 选择、object API 与结构化 PDF 校验；
 - direct-first、可选代理回退及完整阶段尝试记录。
 
 验收标准：
@@ -102,7 +100,6 @@
 | `browser.py` | 持久化浏览器会话、登录/挑战状态 |
 | `pipeline.py` | 候选排序、PDF 缓存与回退 |
 | `cli.py` | 批量输入、参数、退出码与可选集中报告 |
-| `config.py` / `elsevier.py` | DPAPI 凭据与 Elsevier API 下载链 |
 | `publisher_profiles.py` | 21 家出版社识别、入口与支持等级 |
 | `job_store.py` / `job_runner.py` | SQLite 任务、恢复、心跳与报告 |
 | `broker.py` | profile 单实例后台任务串行化 |

@@ -116,7 +116,16 @@ def _write_supplement_results_csv(items: list[dict[str, object]], destination: P
         "失败原因",
     ]
     rows: list[dict[str, object]] = []
+    previous_rows: list[dict[str, str]] = []
+    if destination.exists():
+        with destination.open("r", encoding="utf-8-sig", newline="") as source:
+            previous_rows = list(csv.DictReader(source))
+    previous_dois = {str(row.get("DOI") or "").lower() for row in previous_rows}
     for item in items:
+        doi = str(item["doi"]).lower()
+        if item["status"] in {"pending", "running"} and doi in previous_dois:
+            # 未处理条目不得用占位行覆盖该 DOI 已有的附件结果。
+            continue
         base = {
             "序号": item["rank"],
             "DOI": item["doi"],
@@ -173,12 +182,30 @@ def _write_supplement_results_csv(items: list[dict[str, object]], destination: P
                     }
                 )
     if destination.exists():
-        current_dois = {str(item["doi"]).lower() for item in items}
-        with destination.open("r", encoding="utf-8-sig", newline="") as source:
-            previous = csv.DictReader(source)
-            rows.extend(
-                row for row in previous if str(row.get("DOI") or "").lower() not in current_dois
+        processed_dois = {
+            str(item["doi"]).lower()
+            for item in items
+            if item["status"] not in {"pending", "running"}
+        }
+        current_success_paths = {
+            (
+                str(row.get("DOI") or "").lower(),
+                os.path.normcase(os.path.abspath(str(row.get("本地路径") or ""))),
             )
+            for row in rows
+            if row.get("SI状态") in {"downloaded", "cached"} and row.get("本地路径")
+        }
+        for row in previous_rows:
+            doi = str(row.get("DOI") or "").lower()
+            if doi not in processed_dois:
+                rows.append(row)
+                continue
+            if row.get("SI状态") not in {"downloaded", "cached"} or not row.get("本地路径"):
+                continue
+            path_key = (doi, os.path.normcase(os.path.abspath(str(row["本地路径"]))))
+            if path_key not in current_success_paths:
+                # 重试未成功发现旧附件时，仍保留其下载记录和本地文件信息。
+                rows.append(row)
     rows.sort(key=lambda row: (int(row.get("序号") or 0), str(row.get("附件名") or "")))
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
@@ -263,6 +290,10 @@ def run_job(
         ),
         download_supplements=bool(options.get("supplements") or options.get("supplements_only")),
         supplements_only=bool(options.get("supplements_only")),
+        supplement_urls={
+            str(doi): [str(url) for url in urls]
+            for doi, urls in (options.get("supplement_urls") or {}).items()
+        },
         browser_display=str(
             options.get("browser_display") or ("off" if options.get("headless") else "foreground")
         ),

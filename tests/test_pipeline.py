@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from doi_harvester.config import ElsevierCredentials
-from doi_harvester.elsevier import ElsevierDownload
 from doi_harvester.metadata import MetadataError
 from doi_harvester.models import (
     ArticleMetadata,
@@ -56,23 +54,6 @@ class FakeTransport:
         )
 
 
-class FakeElsevier:
-    def __init__(self, *, succeeds: bool = True) -> None:
-        self.succeeds = succeeds
-        self.calls: list[str] = []
-
-    def download(self, *, doi: str, destination: Path, **_kwargs: object) -> ElsevierDownload:
-        self.calls.append(doi)
-        if self.succeeds:
-            destination.write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
-            return ElsevierDownload(
-                True,
-                "downloaded",
-                source="elsevier_api:object_eid:direct",
-            )
-        return ElsevierDownload(False, "not_entitled")
-
-
 def test_pipeline_downloads_only_pdf(tmp_path: Path) -> None:
     transport = FakeTransport(succeeds=True)
     harvester = Harvester(
@@ -123,29 +104,7 @@ def test_pipeline_prefers_openalex_candidate(tmp_path: Path) -> None:
     assert transport.urls[0] == "https://repository.test/paper.pdf"
 
 
-def test_pipeline_uses_elsevier_after_oa_and_before_generic_candidate(tmp_path: Path) -> None:
-    transport = FakeTransport(succeeds=False)
-    elsevier = FakeElsevier()
-    harvester = Harvester(
-        output_dir=tmp_path,
-        crossref=FakeCrossref(),
-        openalex=FakeOpenAlex(
-            [DownloadCandidate("https://repository.test/missing.pdf", "openalex", True)]
-        ),
-        transport=transport,
-        elsevier=elsevier,
-        elsevier_credentials=ElsevierCredentials(api_key="secret"),
-    )
-
-    result = harvester.download("10.1016/example")
-
-    assert result.success is True
-    assert result.source == "elsevier_api:object_eid:direct"
-    assert transport.urls == ["https://repository.test/missing.pdf"]
-    assert elsevier.calls == ["10.1016/example"]
-
-
-def test_pipeline_elsevier_failure_does_not_block_generic_fallback(tmp_path: Path) -> None:
+def test_pipeline_uses_public_candidate_for_elsevier(tmp_path: Path) -> None:
     class ElsevierCrossref(FakeCrossref):
         def fetch(self, doi: str) -> ArticleMetadata:
             return ArticleMetadata(
@@ -161,8 +120,6 @@ def test_pipeline_elsevier_failure_does_not_block_generic_fallback(tmp_path: Pat
         crossref=ElsevierCrossref(),
         openalex=FakeOpenAlex(),
         transport=transport,
-        elsevier=FakeElsevier(succeeds=False),
-        elsevier_credentials=ElsevierCredentials(api_key="secret"),
     )
 
     result = harvester.download("10.1016/example")
@@ -185,21 +142,6 @@ def test_pipeline_reports_failure_without_creating_pdf(tmp_path: Path) -> None:
     assert result.success is False
     assert result.pdf_path is None
     assert list(result.article_dir.iterdir()) == []
-
-
-def test_pipeline_classifies_elsevier_api_configuration_error(tmp_path: Path) -> None:
-    result = DownloadResult(
-        doi="10.1016/example",
-        success=False,
-        status="api_configuration_error",
-        article_dir=tmp_path,
-    )
-
-    Harvester._classify_result(result)
-
-    assert result.outcome == "config_needed"
-    assert result.next_action is not None
-    assert "Article Retrieval" in result.next_action.message
 
 
 def test_pipeline_uses_detected_publisher_in_auth_command(tmp_path: Path) -> None:
@@ -391,6 +333,33 @@ def test_body_authorization_gate_does_not_start_supplement_request(monkeypatch, 
     )
     worker._add_supplements(result)
     assert result.supplement_status == "not_requested"
+
+
+def test_pipeline_passes_verified_supplement_urls_to_downloader(monkeypatch, tmp_path):
+    doi = "10.1002/anie.200701144"
+    url = "https://www.wiley-vch.de/contents/jc_2002/2007/z701144_s.pdf"
+    calls = {}
+
+    def download(self, *, doi, article_dir, explicit_urls=None):
+        calls.update(doi=doi, article_dir=article_dir, explicit_urls=explicit_urls)
+        return "downloaded", [], []
+
+    monkeypatch.setattr("doi_harvester.supplements.HttpSupplementDownloader.download", download)
+    worker = Harvester(
+        output_dir=tmp_path,
+        download_supplements=True,
+        supplements_only=True,
+        supplement_urls={doi: [url]},
+    )
+    result = DownloadResult(
+        doi=doi, success=False, status="pending", article_dir=tmp_path / "paper"
+    )
+
+    worker._add_supplements(result)
+
+    assert calls["doi"] == doi
+    assert calls["explicit_urls"] == [url]
+    assert result.supplement_status == "downloaded"
 
 
 def test_opened_edge_with_unconfirmed_content_does_not_block_body_cache(tmp_path):

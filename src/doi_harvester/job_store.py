@@ -283,6 +283,24 @@ class JobStore:
                 raise KeyError(f"任务不存在：{job_id}")
             connection.commit()
 
+    def set_challenge_policy(self, job_id: str, policy: str) -> None:
+        """更新任务的人工验证策略，同时保留其他运行选项。"""
+        if policy not in {"pause", "skip", "fail-fast"}:
+            raise ValueError(f"未知人工验证策略：{policy}")
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT options_json FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"任务不存在：{job_id}")
+            options = json.loads(str(row["options_json"] or "{}"))
+            options["challenge_policy"] = policy
+            connection.execute(
+                "UPDATE jobs SET options_json = ?, updated_at = ?, heartbeat_at = ? WHERE id = ?",
+                (json.dumps(options, ensure_ascii=False), _now(), _now(), job_id),
+            )
+            connection.commit()
+
     def heartbeat(self, job_id: str) -> None:
         timestamp = _now()
         with self.connect() as connection:

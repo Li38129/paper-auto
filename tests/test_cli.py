@@ -5,8 +5,6 @@ import pytest
 
 from doi_harvester import cli, job_runner
 from doi_harvester.browser import AuthorizationResult
-from doi_harvester.config import ElsevierConfig, GlobalConfig
-from doi_harvester.elsevier import ElsevierDownload
 from doi_harvester.models import DownloadResult
 
 
@@ -410,94 +408,8 @@ def test_auth_command_accepts_supported_publisher(
     assert calls == [publisher]
 
 
-def test_elsevier_setup_uses_hidden_input_and_masks_secret(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    saved: list[GlobalConfig] = []
-
-    class FakeStore:
-        path = tmp_path / "config.json"
-
-        def __init__(self) -> None:
-            self.config = GlobalConfig()
-
-        def load(self) -> GlobalConfig:
-            return self.config
-
-        def save(self, config: GlobalConfig) -> None:
-            self.config = config
-            saved.append(config)
-
-    monkeypatch.setattr(cli, "GlobalConfigStore", FakeStore)
-    monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: "top-secret-key")
-
-    exit_code = cli.main(["elsevier-setup", "--set-key", "--show"])
-
-    output = capsys.readouterr().out
-    assert exit_code == 0
-    assert saved[0].elsevier.api_key == "top-secret-key"
-    assert "top-secret-key" not in output
-    assert "**********-key" in output
-
-
-def test_elsevier_setup_validate_does_not_keep_pdf(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    destinations: list[Path] = []
-
-    class FakeStore:
-        path = tmp_path / "config.json"
-
-        def load(self) -> GlobalConfig:
-            return GlobalConfig(elsevier=ElsevierConfig(api_key="secret"))
-
-        def save(self, _config: GlobalConfig) -> None:
-            return None
-
-    class FakeElsevier:
-        def download(self, *, destination: Path, **_kwargs: object) -> ElsevierDownload:
-            destination.write_bytes(b"%PDF-1.7")
-            destinations.append(destination)
-            return ElsevierDownload(
-                True,
-                "downloaded",
-                source="elsevier_api:object_eid:direct",
-            )
-
-    monkeypatch.setattr(cli, "GlobalConfigStore", FakeStore)
-    monkeypatch.setattr(cli, "ElsevierApiClient", FakeElsevier)
-
-    exit_code = cli.main(["elsevier-setup", "--validate"])
-
-    assert exit_code == 0
-    assert len(destinations) == 1
-    assert not destinations[0].exists()
-
-
-def test_elsevier_setup_explains_api_configuration_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    class FakeStore:
-        path = tmp_path / "config.json"
-
-        def load(self) -> GlobalConfig:
-            return GlobalConfig(elsevier=ElsevierConfig(api_key="secret"))
-
-        def save(self, _config: GlobalConfig) -> None:
-            return None
-
-    class FakeElsevier:
-        def download(self, **_kwargs: object) -> ElsevierDownload:
-            return ElsevierDownload(False, "api_configuration_error")
-
-    monkeypatch.setattr(cli, "GlobalConfigStore", FakeStore)
-    monkeypatch.setattr(cli, "ElsevierApiClient", FakeElsevier)
-
-    exit_code = cli.main(["elsevier-setup", "--validate"])
-
-    output = capsys.readouterr().out
-    assert exit_code == 2
-    assert "Article Retrieval API" in output
+def test_removed_elsevier_setup_is_not_a_cli_command() -> None:
+    assert "elsevier-setup" not in cli.build_parser().format_help()
 
 
 @pytest.mark.parametrize("mode", [[], ["--supplements"], ["--supplements-only"]])
@@ -578,4 +490,94 @@ def test_all_inputs_and_modes_create_checkpoint_task(
 def test_overwrite_rejected_before_task_creation(tmp_path, mode):
     with pytest.raises(SystemExit, match="overwrite"):
         cli.main(["download", "--doi", "10.1000/example", "--overwrite", *mode])
+    assert not (tmp_path / "runtime" / "jobs" / "jobs.sqlite3").exists()
+
+
+def test_cli_persists_explicit_supplement_urls_with_recoverable_task(tmp_path, monkeypatch):
+    import json
+
+    from doi_harvester import cli
+    from doi_harvester.job_store import JobStore
+
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(cli, "run_job", lambda job_id, **_: "completed")
+    output = tmp_path / "papers"
+    source = tmp_path / "papers.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "papers": [
+                    {
+                        "rank": 358,
+                        "doi": "10.1002/anie.200701144",
+                        "title": "Fast Lithium Ion Conduction",
+                        "folder_path": str(output / "0358_10.1002_anie.200701144"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    url = "https://www.wiley-vch.de/contents/jc_2002/2007/z701144_s.pdf"
+
+    assert (
+        cli.main(
+            [
+                "download",
+                "--papers-file",
+                str(source),
+                "--output-dir",
+                str(output),
+                "--supplements-only",
+                "--supplement-url",
+                f"10.1002/anie.200701144={url}",
+            ]
+        )
+        == 0
+    )
+
+    job = JobStore(runtime / "jobs" / "jobs.sqlite3").get_job(
+        JobStore(runtime / "jobs" / "jobs.sqlite3").list_jobs()[0]["id"]
+    )
+    options = json.loads(job["options_json"])
+    assert options["supplement_urls"] == {"10.1002/anie.200701144": [url]}
+
+
+def test_cli_rejects_supplement_url_for_unrequested_doi_before_creation(tmp_path, monkeypatch):
+    import json
+
+    from doi_harvester import cli
+
+    monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(tmp_path / "runtime"))
+    source = tmp_path / "papers.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "papers": [
+                    {
+                        "rank": 1,
+                        "doi": "10.1000/example",
+                        "folder_path": str(tmp_path / "papers" / "1"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit, match="不在本次任务"):
+        cli.main(
+            [
+                "download",
+                "--papers-file",
+                str(source),
+                "--output-dir",
+                str(tmp_path / "papers"),
+                "--supplements-only",
+                "--supplement-url",
+                "10.1000/other=https://publisher.test/si.pdf",
+            ]
+        )
     assert not (tmp_path / "runtime" / "jobs" / "jobs.sqlite3").exists()

@@ -48,6 +48,8 @@ def _page_matches_doi(page: object, doi: str) -> bool:
         parsed = urlsplit(raw)
         if parsed.scheme in {"http", "https"}:
             path = unquote(parsed.path).rstrip("/")
+            if (parsed.hostname or "").casefold().endswith("frontiersin.org"):
+                path = re.sub(r"/full$", "", path, flags=re.IGNORECASE)
             if (parsed.hostname or "").casefold() in {"doi.org", "dx.doi.org"}:
                 raw = path.lstrip("/")
             else:
@@ -72,6 +74,39 @@ def _page_matches_doi(page: object, doi: str) -> bool:
     url_doi = candidate(str(page.url))
     known = metadata | ({url_doi} if url_doi else set())
     return known == {target}
+
+
+def wait_for_sciencedirect_article(page: object) -> bool:
+    """等待 Elsevier DOI 中间页跳转到带完整正文内容的 ScienceDirect 页面。"""
+    host = (urlsplit(str(getattr(page, "url", ""))).hostname or "").casefold()
+    if host == "linkinghub.elsevier.com":
+        try:
+            page.wait_for_url("https://www.sciencedirect.com/science/article/**", timeout=20000)
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+            host = (urlsplit(str(getattr(page, "url", ""))).hostname or "").casefold()
+        except Exception:
+            return False
+    if host != "www.sciencedirect.com":
+        return False
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        if page.evaluate("() => document.documentElement.dataset.autopaperSdReady === 'true'"):
+            return True
+        attached = page.locator(
+            "a[href*='-mmc'], a[href*='supplementary'], a[href*='supplemental']"
+        ).count()
+        if attached == 0:
+            # ScienceDirect 的 SI 下载链接由页面脚本延迟加入。
+            with suppress(Exception):
+                page.wait_for_function(
+                    "() => Array.from(document.querySelectorAll('a[href]'))"
+                    + ".some(a => /-mmc/i.test(a.href))",
+                    timeout=5000,
+                )
+        page.evaluate("() => { document.documentElement.dataset.autopaperSdReady = 'true'; }")
+        return True
+    except Exception:
+        return False
 
 
 def work_page(context: object, profile_dir: Path | None = None) -> object:
@@ -182,6 +217,7 @@ class VisibleBrowser:
                 marker.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
                 with suppress(Exception):
                     page.wait_for_load_state("domcontentloaded", timeout=10000)
+                wait_for_sciencedirect_article(page)
                 status = wait_for_verification(page, initial_status=classify_page(page))
                 if page.is_closed():
                     return DisplayResult("browser_display_unavailable", target, "work_tab_closed")

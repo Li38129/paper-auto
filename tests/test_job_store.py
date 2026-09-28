@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -42,6 +43,42 @@ def test_supplement_result_survives_job_store_reopen(tmp_path: Path) -> None:
     item = JobStore(tmp_path / "jobs.sqlite3").get_job(job_id)["items"][0]
     assert item["supplement_status"] == "downloaded"
     assert item["supplements"][0]["name"] == "si.csv"
+
+
+def test_challenge_policy_update_preserves_existing_job_options(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=sample_records(tmp_path),
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=False,
+        options={"supplements_only": True, "browser_display": "foreground"},
+    )
+
+    store.set_challenge_policy(job_id, "skip")
+
+    with store.connect() as connection:
+        options = json.loads(
+            connection.execute(
+                "SELECT options_json FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()["options_json"]
+        )
+    assert options["challenge_policy"] == "skip"
+    assert options["supplements_only"] is True
+    assert options["browser_display"] == "foreground"
+
+
+def test_challenge_policy_update_rejects_invalid_policy(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    job_id = store.create_job(
+        records=sample_records(tmp_path),
+        output_dir=tmp_path,
+        report_dir=None,
+        browser_fallback=False,
+    )
+
+    with pytest.raises(ValueError, match="未知人工验证策略"):
+        store.set_challenge_policy(job_id, "continue")
 
 
 def sample_records(root: Path) -> list[dict[str, object]]:

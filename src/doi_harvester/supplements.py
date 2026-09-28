@@ -6,10 +6,11 @@ import base64
 import hashlib
 import json
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import requests
 
@@ -64,9 +65,10 @@ SUPPLEMENT_EXTENSIONS = {
 class _SupplementLinks(HTMLParser):
     """从出版社页面收集实际附件入口。"""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, doi: str = "") -> None:
         super().__init__()
         self.base_url = base_url
+        self.expected_doi = unquote(doi).strip().casefold()
         self.urls: list[str] = []
         self._anchor_href = ""
         self._anchor_context = ""
@@ -99,7 +101,19 @@ class _SupplementLinks(HTMLParser):
             return
         parsed_href = urlparse(urljoin(self.base_url, self._anchor_href))
         parsed_base = urlparse(self.base_url)
-        path = parsed_href.path.casefold()
+        path = unquote(parsed_href.path).casefold()
+        host = parsed_href.netloc.casefold()
+        if "getftrlinkout" in path or (
+            host.startswith("scholar.google.")
+            or (host == "scholar.google.com" and path.startswith("/scholar"))
+        ):
+            self._anchor_href = ""
+            self._anchor_context = ""
+            return
+        if parsed_href.fragment and Path(path).suffix in {".html", ".htm"}:
+            self._anchor_href = ""
+            self._anchor_context = ""
+            return
         if (
             parsed_href.fragment
             and parsed_href.netloc == parsed_base.netloc
@@ -108,14 +122,27 @@ class _SupplementLinks(HTMLParser):
             self._anchor_href = ""
             self._anchor_context = ""
             return
-        is_hint_url = any(hint in href for hint in SUPPLEMENT_HINTS)
+        is_hint_url = any(
+            hint in f"{path}?{parsed_href.query}".casefold() for hint in SUPPLEMENT_HINTS
+        )
+        is_legacy_wiley_si = host.endswith("wiley-vch.de") and Path(path).name.endswith("_s.pdf")
+        if host in {"doi.org", "dx.doi.org"} and "/suppl_file/" in path:
+            marker = path.casefold().rfind("/suppl_file/")
+            match = re.search(r"10\.\d{4,9}/.+$", path[:marker], re.IGNORECASE)
+            linked_doi = unquote(match.group(0)).casefold() if match else ""
+            if not self.expected_doi or linked_doi != self.expected_doi:
+                self._anchor_href = ""
+                self._anchor_context = ""
+                return
         has_supplement_label = any(
             hint in self._anchor_context.casefold() for hint in SUPPLEMENT_TEXT_HINTS
         )
         is_figshare_url = parsed_href.netloc.casefold().endswith("figshare.com")
         is_file_link = Path(path).suffix in SUPPLEMENT_EXTENSIONS
-        if (is_hint_url and (not is_figshare_url or has_supplement_label)) or (
-            has_supplement_label and is_file_link
+        if (
+            (is_hint_url and (not is_figshare_url or has_supplement_label))
+            or (has_supplement_label and is_file_link)
+            or is_legacy_wiley_si
         ):
             self.urls.append(urljoin(self.base_url, self._anchor_href))
         self._anchor_href = ""
@@ -178,6 +205,17 @@ def _digest(path: Path) -> str:
     return value.hexdigest().upper()
 
 
+def _merge_fallback_attempts(
+    result: tuple[str, list[SupplementArtifact], list[Attempt]],
+    fallback: tuple[str, list[SupplementArtifact], list[Attempt]] | None,
+) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
+    """保留回退路径的诊断记录，并优先采用其实际下载状态。"""
+    if fallback is None:
+        return result
+    status, artifacts, attempts = result
+    return status, artifacts, [*fallback[2], *attempts]
+
+
 class HttpSupplementDownloader:
     """先使用普通 HTTP，再复用已有浏览器会话获取附件。"""
 
@@ -193,7 +231,7 @@ class HttpSupplementDownloader:
         self.require_edge = require_edge
 
     def download(
-        self, *, doi: str, article_dir: Path
+        self, *, doi: str, article_dir: Path, explicit_urls: list[str] | None = None
     ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
         page_url = (
             f"https://advanced.onlinelibrary.wiley.com/doi/{doi}"
@@ -204,19 +242,45 @@ class HttpSupplementDownloader:
         )
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; AutoPaper/0.1)"})
+        if explicit_urls:
+            # 对已由用户核验的 SI 直链复用同一套流式传输、校验和缓存逻辑。
+            return self._download_urls(
+                session, list(dict.fromkeys(explicit_urls)), article_dir, require_https=True
+            )
         try:
             response = session.get(page_url, timeout=self.timeout_seconds)
             html = response.text
             if response.status_code in {401, 403, 429} or "just a moment" in html[:600].casefold():
-                return self._browser_or_auth(
+                page_reason = (
+                    "page_rate_limited" if response.status_code == 429
+                    else "page_request_denied" if response.status_code in {401, 403}
+                    else "page_unconfirmed"
+                )
+                page_attempt = Attempt(
+                    source="supplement:http",
+                    url=page_url,
+                    success=False,
+                    reason=page_reason,
+                    status_code=response.status_code,
+                )
+                pmc_result = self._download_europepmc_supplements(session, doi, article_dir)
+                if pmc_result is not None and pmc_result[0] != "unconfirmed":
+                    return pmc_result
+                browser_result = self._browser_or_auth(
                     doi=doi, article_dir=article_dir, session=session, page_url=page_url
                 )
+                status, files, attempts = _merge_fallback_attempts(browser_result, pmc_result)
+                return status, files, [page_attempt, *attempts]
             response.raise_for_status()
         except requests.RequestException as exc:
+            pmc_result = self._download_europepmc_supplements(session, doi, article_dir)
+            if pmc_result is not None and pmc_result[0] != "unconfirmed":
+                return pmc_result
             if self.profile_dir and _read_cdp_endpoint(self.profile_dir):
-                return self._browser_or_auth(
+                browser_result = self._browser_or_auth(
                     doi=doi, article_dir=article_dir, session=session, page_url=page_url
                 )
+                return _merge_fallback_attempts(browser_result, pmc_result)
             return (
                 "page_unavailable",
                 [],
@@ -229,21 +293,200 @@ class HttpSupplementDownloader:
                     )
                 ],
             )
-        parser = _SupplementLinks(response.url)
+        parser = _SupplementLinks(response.url, doi=doi)
         parser.feed(html)
         urls = list(dict.fromkeys(parser.urls))
         if not urls:
             confirmed_none = parser.confirmed_no_supplements or _page_confirms_no_supplements(html)
+            if not confirmed_none:
+                pmc_result = self._download_europepmc_supplements(session, doi, article_dir)
+                if pmc_result is not None and pmc_result[0] != "unconfirmed":
+                    return pmc_result
             if not confirmed_none and self.profile_dir and _read_cdp_endpoint(self.profile_dir):
-                return self._browser_or_auth(
+                browser_result = self._browser_or_auth(
                     doi=doi, article_dir=article_dir, session=session, page_url=page_url
                 )
+                return _merge_fallback_attempts(browser_result, pmc_result)
             return (
-                "not_found" if confirmed_none else "unconfirmed",
-                [],
-                [],
+                "not_found" if confirmed_none else pmc_result[0] if pmc_result else "unconfirmed",
+                pmc_result[1] if pmc_result else [],
+                pmc_result[2] if pmc_result else [],
             )
         return self._download_urls(session, urls, article_dir)
+
+    def _download_europepmc_supplements(
+        self, session: requests.Session, doi: str, article_dir: Path
+    ) -> tuple[str, list[SupplementArtifact], list[Attempt]] | None:
+        """按精确 DOI 从 PMC AWS 元数据获取结构化标记的补充文件。"""
+        api_root = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+        search_url = f"{api_root}/search"
+        try:
+            search = session.get(
+                search_url,
+                params={"query": f"DOI:{doi}", "format": "json", "resultType": "core"},
+                timeout=self.timeout_seconds,
+            )
+            search.raise_for_status()
+            matches = [
+                item
+                for item in search.json().get("resultList", {}).get("result", [])
+                if str(item.get("doi") or "").strip().casefold() == doi.casefold()
+                and str(item.get("pmcid") or "").upper().startswith("PMC")
+            ]
+            if not matches:
+                return None
+            pmcid = str(matches[0]["pmcid"]).upper()
+            bucket = "https://pmc-oa-opendata.s3.amazonaws.com"
+            listing = session.get(
+                bucket,
+                params={"list-type": "2", "prefix": f"{pmcid}."},
+                timeout=self.timeout_seconds,
+            )
+            listing.raise_for_status()
+            entries = ET.fromstring(listing.content)
+            keys = [
+                element.text or ""
+                for element in entries.iter()
+                if element.tag.rsplit("}", 1)[-1] == "Key"
+            ]
+            metadata_keys = [
+                key
+                for key in keys
+                if Path(key).name.startswith(f"{pmcid}.") and key.endswith(".json")
+            ]
+            metadata_records: list[dict[str, object]] = []
+            for key in metadata_keys:
+                metadata_response = session.get(
+                    f"{bucket}/{quote(key, safe='/')}", timeout=self.timeout_seconds
+                )
+                metadata_response.raise_for_status()
+                record = metadata_response.json()
+                if str(record.get("doi") or "").strip().casefold() == doi.casefold():
+                    metadata_records.append(record)
+            if not metadata_records:
+                return (
+                    "unconfirmed",
+                    [],
+                    [
+                        Attempt(
+                            source="supplement:pmc_s3",
+                            url=f"{bucket}/?list-type=2&prefix={pmcid}.",
+                            success=False,
+                            reason="exact_doi_not_found_in_pmc_cloud_metadata",
+                        )
+                    ],
+                )
+            metadata = max(metadata_records, key=lambda item: int(item.get("version") or 0))
+
+            def https_from_s3(value: str) -> str:
+                parsed = urlparse(value)
+                if parsed.scheme != "s3" or parsed.netloc != "pmc-oa-opendata":
+                    raise ValueError("unexpected_pmc_s3_url")
+                target = f"{bucket}/{parsed.path.lstrip('/')}"
+                return f"{target}?{parsed.query}" if parsed.query else target
+
+            xml_url = https_from_s3(str(metadata.get("xml_url") or ""))
+            article_xml = session.get(xml_url, timeout=self.timeout_seconds)
+            article_xml.raise_for_status()
+            root = ET.fromstring(article_xml.content)
+            filenames: list[str] = []
+            has_supplementary_section = False
+            for element in root.iter():
+                if element.tag.rsplit("}", 1)[-1] != "supplementary-material":
+                    continue
+                has_supplementary_section = True
+                for child in element.iter():
+                    if child.tag.rsplit("}", 1)[-1] not in {
+                        "supplementary-material",
+                        "media",
+                        "self-uri",
+                    }:
+                        continue
+                    for key, value in child.attrib.items():
+                        if key.rsplit("}", 1)[-1] == "href" and value:
+                            filename = Path(unquote(value).replace("\\", "/")).name
+                            if filename and filename not in filenames:
+                                filenames.append(filename)
+            if not filenames:
+                if not has_supplementary_section:
+                    return (
+                        "not_found",
+                        [],
+                        [
+                            Attempt(
+                                source="supplement:pmc_s3",
+                                url=xml_url,
+                                success=True,
+                                reason="exact_doi_full_text_has_no_supplementary_material",
+                                final_url=article_xml.url,
+                                status_code=article_xml.status_code,
+                                content_type=article_xml.headers.get("content-type", ""),
+                            )
+                        ],
+                    )
+                return (
+                    "unconfirmed",
+                    [],
+                    [
+                        Attempt(
+                            source="supplement:pmc_s3",
+                            url=xml_url,
+                            success=False,
+                            reason="supplementary_material_has_no_file_reference",
+                            final_url=article_xml.url,
+                        )
+                    ],
+                )
+            media_urls = [str(value) for value in metadata.get("media_urls", [])]
+            url_by_name = {
+                Path(urlparse(value).path).name.casefold(): https_from_s3(value)
+                for value in media_urls
+                if value.startswith("s3://pmc-oa-opendata/")
+            }
+            urls = [
+                url_by_name[name.casefold()] for name in filenames if name.casefold() in url_by_name
+            ]
+            missing = [name for name in filenames if name.casefold() not in url_by_name]
+            if missing:
+                return (
+                    "unconfirmed",
+                    [],
+                    [
+                        Attempt(
+                            source="supplement:pmc_s3",
+                            url=xml_url,
+                            success=False,
+                            reason=f"supplement_not_available_in_open_data:{','.join(missing)}",
+                            final_url=article_xml.url,
+                        )
+                    ],
+                )
+            status, artifacts, attempts = self._download_urls(
+                session, urls, article_dir, require_https=True
+            )
+            metadata_attempt = Attempt(
+                source="supplement:pmc_s3",
+                url=xml_url,
+                success=True,
+                reason="exact_doi_and_supplement_reference_verified",
+                final_url=article_xml.url,
+                status_code=article_xml.status_code,
+                content_type=article_xml.headers.get("content-type", ""),
+            )
+            return status, artifacts, [metadata_attempt, *attempts]
+        except (requests.RequestException, OSError, ValueError, ET.ParseError) as exc:
+            return (
+                "unconfirmed",
+                [],
+                [
+                    Attempt(
+                        source="supplement:pmc_s3",
+                        url=search_url,
+                        success=False,
+                        reason=f"pmc_open_data_error:{type(exc).__name__}:{exc}",
+                    )
+                ],
+            )
 
     def _browser_or_auth(
         self, *, doi: str, article_dir: Path, session: requests.Session, page_url: str
@@ -251,14 +494,14 @@ class HttpSupplementDownloader:
         endpoint = _read_cdp_endpoint(self.profile_dir) if self.profile_dir else ""
         if not endpoint:
             return (
-                "challenge_required",
+                "browser_unavailable",
                 [],
                 [
                     Attempt(
                         source="supplement:browser",
                         url=page_url,
                         success=False,
-                        reason="challenge_required",
+                        reason="browser_unavailable",
                     )
                 ],
             )
@@ -274,9 +517,10 @@ class HttpSupplementDownloader:
 
                     require_edge_browser(browser)
                 context = browser.contexts[0]
-                from .visible_browser import work_page
+                from .visible_browser import wait_for_sciencedirect_article, work_page
 
                 page = work_page(context, self.profile_dir)
+                wait_for_sciencedirect_article(page)
                 article_page = _is_current_article_page(page, doi)
                 if page.url != page_url and not article_page:
                     page.goto(
@@ -284,6 +528,7 @@ class HttpSupplementDownloader:
                         wait_until="domcontentloaded",
                         timeout=int(self.timeout_seconds * 1000),
                     )
+                    wait_for_sciencedirect_article(page)
                 from .browser import wait_for_verification
 
                 page_status = wait_for_verification(page)
@@ -316,7 +561,7 @@ class HttpSupplementDownloader:
                         ],
                     )
                 html = page.content()
-                parser = _SupplementLinks(page.url)
+                parser = _SupplementLinks(page.url, doi=doi)
                 parser.feed(html)
                 urls = list(dict.fromkeys(parser.urls))
                 if not urls:
@@ -365,32 +610,23 @@ class HttpSupplementDownloader:
                     page, [url], article_dir
                 )
                 attempts.extend(browser_routes)
-                if files or status != "challenge_required":
+                if files or browser_status not in {"not_downloadable", "partial"}:
                     status = browser_status
-            if status == "challenge_required" and doi:
+            if doi and not files:
                 from .browser import wait_for_verification
 
                 page_status = wait_for_verification(page)
-                if (
-                    page_status not in {"challenge_required", "authentication_required"}
-                    and doi
-                    and _is_current_article_page(page, doi)
-                ):
-                    status, files, routes = self._download_urls(session, [url], article_dir)
-                    attempts.extend(routes)
-                    if not files:
-                        browser_status, files, routes = self._download_browser_urls(
-                            page, [url], article_dir
-                        )
-                        attempts.extend(routes)
-                        if files or status != "challenge_required":
-                            status = browser_status
+                if page_status in {"challenge_required", "authentication_required"}:
+                    status = page_status
+                elif not _is_current_article_page(page, doi):
+                    status = "browser_publisher_unavailable"
             artifacts.extend(files)
             final_statuses.append(status)
-            if status == "challenge_required":
+            if status in {"challenge_required", "authentication_required"}:
                 break
-        if any(status == "challenge_required" for status in final_statuses):
-            return "challenge_required", artifacts, attempts
+        for auth_status in ("challenge_required", "authentication_required"):
+            if auth_status in final_statuses:
+                return auth_status, artifacts, attempts
         if any(status not in {"downloaded", "cached"} for status in final_statuses):
             return "partial" if artifacts else "not_downloadable", artifacts, attempts
         return (
@@ -513,10 +749,10 @@ class HttpSupplementDownloader:
                         url=url,
                         success=False,
                         reason=(
-                            "authentication_required"
-                            if response.get("status") == 401
-                            else "challenge_required"
-                            if response.get("status") in {403, 429}
+                            "attachment_rate_limited"
+                            if response.get("status") == 429
+                            else "attachment_request_denied"
+                            if response.get("status") in {401, 403}
                             else f"browser_download_error:{type(exc).__name__}:{exc}"
                         ),
                         status_code=response.get("status"),
@@ -528,10 +764,6 @@ class HttpSupplementDownloader:
             finally:
                 if temporary:
                     temporary.unlink(missing_ok=True)
-        if any(
-            item.reason in {"authentication_required", "challenge_required"} for item in attempts
-        ):
-            return "challenge_required", artifacts, attempts
         if any(not item.success for item in attempts):
             return "partial" if artifacts else "not_downloadable", artifacts, attempts
         return (
@@ -545,7 +777,12 @@ class HttpSupplementDownloader:
         )
 
     def _download_urls(
-        self, session: requests.Session, urls: list[str], article_dir: Path
+        self,
+        session: requests.Session,
+        urls: list[str],
+        article_dir: Path,
+        *,
+        require_https: bool = False,
     ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
         artifacts: list[SupplementArtifact] = []
         attempts: list[Attempt] = []
@@ -560,14 +797,16 @@ class HttpSupplementDownloader:
                                 source="supplement:http",
                                 url=url,
                                 success=False,
-                                reason="authentication_required"
-                                if response.status_code == 401
-                                else "challenge_required",
+                                reason="attachment_rate_limited"
+                                if response.status_code == 429
+                                else "attachment_request_denied",
                                 status_code=response.status_code,
                             )
                         )
-                        return "challenge_required", artifacts, attempts
+                        return "partial" if artifacts else "not_downloadable", artifacts, attempts
                     response.raise_for_status()
+                    if require_https and urlparse(response.url).scheme.lower() != "https":
+                        raise ValueError("insecure_redirect")
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                     name = _supplement_filename(
                         url=response.url,
@@ -649,11 +888,6 @@ class HttpSupplementDownloader:
                     )
                 )
         if any(not item.success for item in attempts):
-            if any(
-                item.reason in {"challenge_required", "authentication_required"}
-                for item in attempts
-            ):
-                return "challenge_required", artifacts, attempts
             return "partial" if artifacts else "not_downloadable", artifacts, attempts
         return (
             (

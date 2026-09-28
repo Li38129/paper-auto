@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .broker import BrokerManager, default_runtime_dir
-from .config import ConfigError, GlobalConfigStore, load_elsevier_credentials, mask_secret
-from .elsevier import ElsevierApiClient
 from .job_store import JobStore
 from .publisher_profiles import PUBLISHER_PROFILES
 
@@ -22,21 +19,8 @@ class DoctorCheck:
     message: str
 
 
-def run_doctor(*, network: bool = False, target_dir: Path | None = None) -> dict[str, object]:
+def run_doctor(*, target_dir: Path | None = None) -> dict[str, object]:
     checks: list[DoctorCheck] = []
-    store = GlobalConfigStore()
-    try:
-        credentials = load_elsevier_credentials(store)
-        checks.append(
-            DoctorCheck(
-                "elsevier_config",
-                "ok" if credentials.api_key else "warning",
-                f"配置路径 {store.path}；API Key {mask_secret(credentials.api_key)}",
-            )
-        )
-    except ConfigError as exc:
-        credentials = None
-        checks.append(DoctorCheck("elsevier_config", "failed", str(exc)))
 
     runtime = default_runtime_dir().resolve()
     try:
@@ -98,28 +82,6 @@ def run_doctor(*, network: bool = False, target_dir: Path | None = None) -> dict
                 str(target),
             )
         )
-
-    if network:
-        if not credentials or not credentials.api_key:
-            checks.append(
-                DoctorCheck("elsevier_network", "warning", "缺少 API Key，未发起网络验证。")
-            )
-        else:
-            with tempfile.TemporaryDirectory(prefix="autopaper-doctor-") as directory:
-                result = ElsevierApiClient().download(
-                    doi="10.1016/j.watres.2024.121507",
-                    destination=Path(directory) / "article.pdf",
-                    api_key=credentials.api_key,
-                    inst_token=credentials.inst_token,
-                    proxy_url=credentials.proxy_url,
-                )
-            checks.append(
-                DoctorCheck(
-                    "elsevier_network",
-                    "ok" if result.success else "failed",
-                    result.source if result.success else result.reason,
-                )
-            )
 
     statuses = {item.status for item in checks}
     overall = "failed" if "failed" in statuses else "warning" if "warning" in statuses else "ok"

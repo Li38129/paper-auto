@@ -308,6 +308,44 @@ def test_page_doi_matches_sciencedirect_metadata() -> None:
     assert not _page_matches_doi(page, "10.1000/other")
 
 
+def test_wait_for_sciencedirect_article_follows_elsevier_interstitial() -> None:
+    from doi_harvester.visible_browser import wait_for_sciencedirect_article
+
+    class Page:
+        url = "https://linkinghub.elsevier.com/retrieve/pii/S123"
+
+        def __init__(self):
+            self.calls = []
+            self.ready = False
+
+        def wait_for_url(self, pattern, timeout):
+            self.calls.append((pattern, timeout))
+            self.url = "https://www.sciencedirect.com/science/article/pii/S123"
+
+        def wait_for_load_state(self, state, timeout):
+            self.calls.append((state, timeout))
+
+        def wait_for_function(self, _predicate, timeout):
+            self.calls.append(("wait_for_si_link", timeout))
+
+        def locator(self, _selector):
+            return SimpleNamespace(count=lambda: 0)
+
+        def evaluate(self, script):
+            if "dataset.autopaperSdReady = 'true'" in script:
+                self.ready = True
+            return self.ready
+
+    page = Page()
+
+    assert wait_for_sciencedirect_article(page)
+    assert page.calls[0] == ("https://www.sciencedirect.com/science/article/**", 20000)
+    assert page.calls[-1] == ("wait_for_si_link", 5000)
+    before = len(page.calls)
+    assert wait_for_sciencedirect_article(page)
+    assert len(page.calls) == before + 1
+
+
 def test_work_page_reuses_saved_target_across_origins(tmp_path: Path) -> None:
     import json
 
@@ -384,6 +422,18 @@ def test_doi_matching_requires_complete_consistent_evidence():
         ),
         ("https://pubs.acs.org/doi/10.1000/example", ["10.1000/other"], "10.1000/example", False),
         ("https://www.sciencedirect.com/science/article/pii/S123", [], "10.1000/example", False),
+        (
+            "https://www.frontiersin.org/journals/chemistry/articles/10.3389/fchem.2022.851264/full",
+            [],
+            "10.3389/fchem.2022.851264",
+            True,
+        ),
+        (
+            "https://www.frontiersin.org/journals/chemistry/articles/10.3389/fchem.2022.851264/full",
+            [],
+            "10.3389/fchem.2022.851265",
+            False,
+        ),
     ]
     for url, metadata, doi, expected in cases:
         page = SimpleNamespace(url=url, evaluate=lambda *_, metadata=metadata: metadata)

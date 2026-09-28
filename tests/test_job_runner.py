@@ -1,9 +1,10 @@
+import csv
 import json
 from pathlib import Path
 
 import pytest
 
-from doi_harvester.job_runner import run_job
+from doi_harvester.job_runner import _write_supplement_results_csv, run_job
 from doi_harvester.job_store import JobStore
 from doi_harvester.models import DownloadResult
 
@@ -156,6 +157,8 @@ def test_run_job_passes_saved_browser_supervision_options(monkeypatch, tmp_path:
             "challenge_policy": "pause",
             "challenge_timeout_seconds": 42,
             "keep_browser_open": True,
+            "supplements_only": True,
+            "supplement_urls": {"10.1000/example": ["https://publisher.test/si.pdf"]},
         },
     )
 
@@ -180,6 +183,7 @@ def test_run_job_passes_saved_browser_supervision_options(monkeypatch, tmp_path:
     assert browser_options["challenge_timeout_seconds"] == 42
     assert browser_options["keep_browser_open"] is True
     assert captured["browser_display"] == "foreground"
+    assert captured["supplement_urls"] == {"10.1000/example": ["https://publisher.test/si.pdf"]}
 
 
 def test_run_job_checkpoints_excel_and_keeps_processing_skips(monkeypatch, tmp_path: Path) -> None:
@@ -282,6 +286,7 @@ def test_old_task_defaults_to_article_mode(monkeypatch, tmp_path):
         output_dir=tmp_path,
         report_dir=None,
         browser_fallback=False,
+        options={"elsevier_api_key": "legacy-placeholder", "elsevier_inst_token": "legacy"},
     )
 
     class Worker:
@@ -296,6 +301,7 @@ def test_old_task_defaults_to_article_mode(monkeypatch, tmp_path):
     assert captured["download_supplements"] is False
     assert captured["supplements_only"] is False
     assert captured["browser_display"] == "foreground"
+    assert "elsevier" not in " ".join(captured)
 
 
 @pytest.mark.parametrize("policy", ["pause", "skip"])
@@ -405,6 +411,77 @@ def test_auth_skipped_is_not_requeued_with_pending_items(tmp_path):
     store.set_job_status(job_id, "needs_attention")
     store.prepare_resume(job_id, retry_failed=True)
     assert [item["doi"] for item in store.pending_items(job_id)] == ["10.1000/2"]
+
+
+def test_pending_csv_checkpoint_preserves_existing_attachment_rows(tmp_path: Path) -> None:
+    destination = tmp_path / "si-results.csv"
+    destination.write_text(
+        "序号,DOI,SI状态,附件名,本地路径,SHA256\n"
+        "1,10.1000/one,downloaded,one.zip,C:\\papers\\one.zip,ABC123\n",
+        encoding="utf-8-sig",
+    )
+
+    _write_supplement_results_csv(
+        [
+            {
+                "rank": 1,
+                "doi": "10.1000/one",
+                "status": "pending",
+                "supplement_status": "pending",
+                "supplements": [],
+                "supplement_attempts": [],
+            },
+            {
+                "rank": 2,
+                "doi": "10.1000/two",
+                "status": "pending",
+                "supplement_status": "pending",
+                "supplements": [],
+                "supplement_attempts": [],
+            },
+        ],
+        destination,
+    )
+
+    rows = list(csv.DictReader(destination.open(encoding="utf-8-sig", newline="")))
+    assert len(rows) == 2
+    existing = next(row for row in rows if row["DOI"] == "10.1000/one")
+    untouched = next(row for row in rows if row["DOI"] == "10.1000/two")
+    assert existing["SI状态"] == "downloaded"
+    assert existing["本地路径"] == "C:\\papers\\one.zip"
+    assert existing["SHA256"] == "ABC123"
+    assert untouched["SI状态"] == "pending"
+
+
+def test_failed_retry_preserves_previous_successful_attachment_row(tmp_path: Path) -> None:
+    destination = tmp_path / "si-results.csv"
+    destination.write_text(
+        "序号,DOI,SI状态,附件名,本地路径,SHA256\n"
+        "1,10.1000/one,downloaded,one.zip,C:\\papers\\one.zip,ABC123\n",
+        encoding="utf-8-sig",
+    )
+
+    _write_supplement_results_csv(
+        [
+            {
+                "rank": 1,
+                "doi": "10.1000/one",
+                "status": "failed",
+                "supplement_status": "unconfirmed",
+                "failure_reason": "unconfirmed",
+                "supplements": [],
+                "supplement_attempts": [],
+            }
+        ],
+        destination,
+    )
+
+    rows = list(csv.DictReader(destination.open(encoding="utf-8-sig", newline="")))
+    success = next(row for row in rows if row["本地路径"])
+    retry = next(row for row in rows if row["SI状态"] == "unconfirmed")
+    assert success["SI状态"] == "downloaded"
+    assert success["本地路径"] == "C:\\papers\\one.zip"
+    assert retry["失败原因"] == "unconfirmed"
 
 
 def test_skip_policy_does_not_hide_doi_confirmation_failure(tmp_path):

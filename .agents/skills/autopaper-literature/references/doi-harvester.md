@@ -44,16 +44,9 @@
 
 ## 首次下载
 
-下载默认使用 `--browser-display foreground --browser-channel msedge`：每篇在外部 Edge 专用标签请求对应 DOI。不要求焦点、页面加载成功或已获得内容元数据；真实标签与本次导航记录绑定后可继续缓存/API。浏览器提取链接仍完整核验 DOI；Edge 无法连接或标签关闭时暂停。每次独立验证缓冲最多10秒，再按确认策略处理。只有用户明确选择无界面运行时使用 off/headless；detach 不改变此要求。
+下载默认使用 `--browser-display foreground --browser-channel msedge`：每篇在外部 Edge 专用标签请求对应 DOI。不要求焦点、页面加载成功或已获得内容元数据；真实标签与本次导航记录绑定后可继续缓存及公开入口。浏览器提取链接仍完整核验 DOI；Edge 无法连接或标签关闭时暂停。每次独立验证缓冲最多10秒，再按确认策略处理。只有用户明确选择无界面运行时使用 off/headless；detach 不改变此要求。
 
-批次含 Elsevier DOI 时，先检查一次全局配置：
-
-```powershell
-& '<项目根目录>\scripts\doi-harvester.ps1' elsevier-setup --show
-& '<项目根目录>\scripts\doi-harvester.ps1' elsevier-setup --validate
-```
-
-若 API Key 未配置，说明可以运行 `elsevier-setup --set-key --validate` 完成一次性配置；不得索要或代填密钥。Key 缺失不会阻断 OpenAlex、出版社入口和浏览器回退。若验证返回 HTTP 403 及 `Requestor configuration settings insufficient`，表示该 Key 已被程序读取，但尚未获准访问 Elsevier Article Retrieval/ScienceDirect API；校园网网页访问权限不会自动赋予开发者 API 权限。此时优先让用户在 Elsevier Developer Portal 为现有 Key 补充相应 API 权限，不必立即新建 Key；只有旧 Key 无法修改权限或已经失效时才重新申请。
+下载时无需配置 Elsevier API Key。独立 PDF 或附件请求返回 401、403、429 只记录该请求失败；仅当前可见页面确实显示验证码或登录页时才按已确认策略暂停或跳过。浏览器断连须单独报告。
 
 ```powershell
 & '<项目根目录>\scripts\doi-harvester.ps1' download `
@@ -67,6 +60,8 @@
 ```
 
 默认使用前台监督模式。按已确认的验证策略处理：pause 保持 Chrome/Edge 当前工作标签，验证完成前不切换下一篇；skip 记录当前篇人工验证跳过并继续。模型每次等待不超过 60 秒，并在状态变化、完成或需要人工操作时及时汇报。任务较多且用户明确要求后台运行时才增加 `--detach`，并同时传入 `--workbook`、`--node-path`、`--node-modules`，由后台任务每批自动回写 Excel。pause 任务遇验证时进入 `waiting_for_user` 并保留后续条目；skip 任务记录 `auth_skipped` 后继续；完成授权后使用 `jobs resume <job_id>` 前台恢复，需要继续后台运行时显式增加 `--detach`。不得重建编号目录或重新编号。
+
+若出版社 DOI 页明确提供 SI 附件，但自动链接发现未识别，可在核验附件确属该 DOI 后，对该 DOI 传入一个或多个 `--supplement-url DOI=HTTPS_URL`。链接随检查点任务配置保存并在恢复时复用；仍由 DOI Harvester 执行流式下载、文件校验、缓存与 SHA-256 记录。MCP `download` 使用 `supplement_urls={DOI: [HTTPS_URL, ...]}`。仅限 SI 或正文加 SI 模式；不得用此参数绕过访问控制，也不得把未核验的链接当作确认无 SI 的证据。
 
 如果 AutoPaper MCP 已注册，可用 `download` 创建相同任务，并用 `job_status` 等待终态。`papers_file`、`output_dir` 和可选 `report_dir` 必须是绝对路径；`report_dir` 只能位于 `<项目根目录>\temp\doi-harvester\jobs`。
 
@@ -91,7 +86,7 @@ ACS、Elsevier 或 RSC 授权命令：
   --auth-timeout 600
 ```
 
-Elsevier 或 RSC 将 `--publisher acs` 分别替换为 `--publisher elsevier` 或 `--publisher rsc`。优先验证并使用 Elsevier API；只有 API 未覆盖或失败时才启用浏览器授权。`--cdp` 浏览器必须保持打开，后续下载复用同一进程、工作标签页和持久化配置。
+Elsevier 或 RSC 将 `--publisher acs` 分别替换为 `--publisher elsevier` 或 `--publisher rsc`。需要浏览器授权时使用外部 Edge 工作标签。`--cdp` 浏览器必须保持打开，后续下载复用同一进程、工作标签页和持久化配置。
 
 Elsevier 浏览器授权示例：
 
@@ -125,6 +120,6 @@ Elsevier 浏览器授权示例：
 每个新下载目标先在 Skill 对话中确认保存绝对路径、下载内容、人工验证策略，再进行 Excel 写入、建目录及下载。请求已含设置时也汇总确认一次；同一目标子批次和恢复不重复询问。CLI 显式传入 `--challenge-policy pause|skip`；MCP `download` 使用 `challenge_policy`（默认 pause，保留 fail-fast 兼容）。人工验证跳过记录 `auth_skipped`，普通恢复不自动重试，最终交付必须报告跳过数，不得把队列 completed 等同于全部下载成功。该规则不允许跳过浏览器连接或 DOI 核验错误。
 
 
-正常调用显式指定 `--browser-channel msedge --browser-display foreground`，使用外部 Edge 专用标签，不使用内置浏览器；off/headless 仅用于用户明确选择的高级运行方式。本次目标 DOI 的导航记录与真实工作标签/会话绑定即可允许缓存/API 继续，焦点、页面加载和内容匹配不是独立传输的前置条件。浏览器提取链接仍严格核验 DOI。
+正常调用显式指定 `--browser-channel msedge --browser-display foreground`，使用外部 Edge 专用标签，不使用内置浏览器；off/headless 仅用于用户明确选择的高级运行方式。本次目标 DOI 的导航记录与真实工作标签/会话绑定即可允许缓存及公开入口 继续，焦点、页面加载和内容匹配不是独立传输的前置条件。浏览器提取链接仍严格核验 DOI。
 
 每次独立验证先最多缓冲10秒，提前消失即继续；仍需验证再按已确认策略处理，不重复等待同一次检测结果。旧下载等待参数不延长十秒缓冲，独立 auth 保留原等待。临时包装脚本放在 `temp/doi-harvester/task-scripts/<任务或目标ID>/`，遵守项目 AGENTS.md，不修改真实任务数据库或把一次性配置混入生产代码。

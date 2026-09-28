@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from doi_harvester.papers import PapersFileError, load_paper_jobs
+from doi_harvester.papers import PapersFileError, load_paper_jobs, validate_supplement_urls
 
 
 def test_load_paper_jobs_validates_and_normalizes(tmp_path: Path) -> None:
@@ -83,3 +83,29 @@ def test_load_paper_jobs_requires_absolute_folder(tmp_path: Path) -> None:
 
     with pytest.raises(PapersFileError, match="绝对路径"):
         load_paper_jobs(papers_file)
+
+
+def test_validate_supplement_urls_normalizes_and_deduplicates() -> None:
+    urls = validate_supplement_urls(
+        {"https://doi.org/10.1000/ABC": ["https://publisher.test/si.pdf"]},
+        {"10.1000/abc"},
+    )
+
+    assert urls == {"10.1000/abc": ["https://publisher.test/si.pdf"]}
+
+
+@pytest.mark.parametrize(
+    ("values", "requested", "message"),
+    [
+        ({"10.1000/other": "https://publisher.test/si.pdf"}, {"10.1000/example"}, "不在本次任务"),
+        ({"10.1000/example": "http://publisher.test/si.pdf"}, {"10.1000/example"}, "HTTPS"),
+        (
+            {"10.1000/example": "https://user:pass@publisher.test/si.pdf"},
+            {"10.1000/example"},
+            "HTTPS",
+        ),
+    ],
+)
+def test_validate_supplement_urls_rejects_invalid_entries(values, requested, message) -> None:
+    with pytest.raises(PapersFileError, match=message):
+        validate_supplement_urls(values, requested)

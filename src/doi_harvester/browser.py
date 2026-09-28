@@ -33,6 +33,7 @@ CHALLENGE_MARKERS = (
 LOGIN_PATH_PATTERN = re.compile(
     r"(?:^|/)(?:login|signin|sign-in|sso|shibboleth|authorize)(?:[./_-]|$)"
 )
+LOGIN_TITLE_MARKERS = ("sign in", "log in", "institutional login", "登录")
 SUBSCRIPTION_MARKERS = (
     "available to purchase",
     "pay-per-view",
@@ -163,14 +164,18 @@ def _pdf_link_is_visible(page: object) -> bool:
 def classify_page(page: object) -> str:
     """把当前页面归类为挑战、登录、订阅不足或可下载状态。"""
     title, body_text, url = _page_signals(page)
-    if any(marker in title or marker in body_text for marker in CHALLENGE_MARKERS):
+    pdf_visible = _pdf_link_is_visible(page)
+    if any(marker in title for marker in CHALLENGE_MARKERS) or (
+        not pdf_visible
+        and any(marker in body_text[:1500] for marker in CHALLENGE_MARKERS)
+    ):
         return "challenge_required"
     path = urlsplit(url).path.casefold()
-    if LOGIN_PATH_PATTERN.search(path):
+    if LOGIN_PATH_PATTERN.search(path) or any(marker in title for marker in LOGIN_TITLE_MARKERS):
         return "authentication_required"
     if any(marker in body_text for marker in SUBSCRIPTION_MARKERS):
         return "subscription_required"
-    if _pdf_link_is_visible(page):
+    if pdf_visible:
         return "ready"
     return "authenticated"
 
@@ -976,6 +981,7 @@ class BrowserPdfDownloader:
                 final_url=page.url,
             )
         urls = self._collect_urls(page=page, candidate_urls=candidate_urls)
+        denied_response: tuple[str, int] | None = None
         for url in urls:
             response = context.request.get(
                 url,
@@ -988,10 +994,12 @@ class BrowserPdfDownloader:
             )
             if response.status in {401, 403, 429}:
                 status = wait_for_verification(page)
-                if status not in {
-                    "challenge_required",
-                    "authentication_required",
-                } and _page_matches_doi(page, doi):
+                if status in {"challenge_required", "authentication_required"}:
+                    return Attempt(
+                        source="browser", url=url, success=False, reason=status,
+                        final_url=page.url, status_code=response.status,
+                    )
+                if _page_matches_doi(page, doi):
                     response = context.request.get(
                         url,
                         headers={"Referer": page.url},
@@ -999,16 +1007,8 @@ class BrowserPdfDownloader:
                         fail_on_status_code=False,
                     )
                 if response.status in {401, 403, 429}:
-                    return Attempt(
-                        source="browser",
-                        url=url,
-                        success=False,
-                        reason="authentication_required"
-                        if response.status == 401
-                        else "challenge_required",
-                        final_url=page.url,
-                        status_code=response.status,
-                    )
+                    denied_response = (url, response.status)
+                    continue
             body = response.body()
             if response.ok and b"%PDF-" in body[:1024] and len(body) >= 1024:
                 temporary.write_bytes(body)
@@ -1066,14 +1066,17 @@ class BrowserPdfDownloader:
                 "authentication_required",
                 "subscription_required",
             }
-            else "no_pdf_after_browser"
+            else "pdf_rate_limited" if denied_response and denied_response[1] == 429
+            else "pdf_request_denied" if denied_response else "no_pdf_after_browser"
         )
+        denied_reason = reason in {"pdf_rate_limited", "pdf_request_denied"}
         return Attempt(
             source="browser",
-            url=doi_url,
+            url=denied_response[0] if denied_response and denied_reason else doi_url,
             success=False,
             reason=reason,
             final_url=page.url,
+            status_code=denied_response[1] if denied_response and denied_reason else None,
         )
 
     def _download_from_surfaces(

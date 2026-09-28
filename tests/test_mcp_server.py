@@ -81,3 +81,36 @@ def test_mcp_rejects_invalid_verification_policy_before_task_creation(tmp_path, 
     with pytest.raises(ValueError, match="challenge_policy"):
         download("invalid.json", str(tmp_path), challenge_policy="unknown")
     assert not (tmp_path / "runtime").exists()
+
+
+def test_mcp_persists_explicit_supplement_urls(tmp_path, monkeypatch):
+    import json
+
+    from doi_harvester import mcp_server
+    from doi_harvester.job_store import JobStore
+
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(mcp_server, "run_job", lambda job_id, **_: "completed")
+    output = tmp_path / "papers"
+    source = tmp_path / "papers.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "papers": [{"rank": 5, "doi": "10.1000/example", "folder_path": str(output / "5")}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    url = "https://publisher.test/si.pdf"
+
+    result = mcp_server.download(
+        str(source),
+        str(output),
+        supplements_only=True,
+        supplement_urls={"10.1000/EXAMPLE": [url]},
+    )
+
+    job = JobStore(runtime / "jobs" / "jobs.sqlite3").get_job(result["job_id"])
+    assert json.loads(job["options_json"])["supplement_urls"] == {"10.1000/example": [url]}

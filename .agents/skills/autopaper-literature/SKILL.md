@@ -62,12 +62,12 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 正文、仅 SI、正文加 SI 均通过 CLI/MCP 自动创建可恢复任务。CLI 的单 DOI、DOI 列表与固定编号清单共用任务执行器；默认当前终端执行，`--detach` 仅切换 Broker。不得使用 `--overwrite`。每篇保存数据库检查点，默认每 100 篇同步报告、结果 CSV 与已配置的 Excel，并在暂停和结束时同步。未指定报告目录时使用 `temp/doi-harvester/jobs/<job_id>`；授权等待或中断后通过原 ID 恢复，不新建重复任务。
 
-SI 链接由浏览器发现后先尝试 HTTP 流式获取，失败附件再使用浏览器回退。逐次失败尝试不能覆盖最终成功结果；JSON 保留尝试过程，CSV/Excel 记录最终附件结果。浏览器提取链接时页面 DOI 须完整匹配，不能依据子串复用错误内容；展示标签已打开后可先尝试缓存/API。旧任务缺少 SI 参数时仍按正文模式恢复。有效缓存、编号和目录保持原有规则。
+SI 链接由浏览器发现后先尝试 HTTP 流式获取，失败附件再使用浏览器回退。逐次失败尝试不能覆盖最终成功结果；JSON 保留尝试过程，CSV/Excel 记录最终附件结果。浏览器提取链接时页面 DOI 须完整匹配，不能依据子串复用错误内容；展示标签已打开后可先尝试缓存及公开入口。旧任务缺少 SI 参数时仍按正文模式恢复。有效缓存、编号和目录保持原有规则。
 
 
-CLI 始终显式传入确认的 `--output-dir`、下载模式、`--browser-channel msedge`、`--browser-display foreground` 和 `--challenge-policy pause|skip`；仅正文不传 SI 参数，正文加 SI 传 `--supplements`，仅 SI 传 `--supplements-only`。MCP 传对应 `output_dir`、`supplements`、`supplements_only`、`challenge_policy`。恢复读取原任务配置。
+CLI 始终显式传入确认的 `--output-dir`、下载模式、`--browser-channel msedge`、`--browser-display foreground` 和 `--challenge-policy pause|skip`；仅正文不传 SI 参数，正文加 SI 传 `--supplements`，仅 SI 传 `--supplements-only`。若出版社页面明确提供且已核验某篇 SI 附件直链，可对该 DOI 重复传 `--supplement-url DOI=HTTPS_URL`；MCP 传 `supplement_urls={DOI: [HTTPS_URL, ...]}`。直链写入可恢复任务配置，仍由 DOI Harvester 负责下载、类型校验、缓存和 SHA-256；不得用它绕过授权。MCP 传对应 `output_dir`、`supplements`、`supplements_only`、`challenge_policy`。恢复读取原任务配置。
 
-人工验证选择 skip 时，该篇标记 `auth_skipped`，记录 DOI、页面、原因和已有文件后继续下一篇，不等待、不自动重试。选择 pause 时，保留页面及检查点，进入 `waiting_for_user`。Edge 未安装、连接失败或标签关闭时暂停；页面内容未核验时不用于链接提取，但不阻断缓存/API。报告须分别统计人工验证跳过数与成功数；队列执行完成不等于全部下载成功。跳过项保留恢复数据，普通恢复不重新入队。
+人工验证选择 skip 时，该篇标记 `auth_skipped`，记录 DOI、页面、原因和已有文件后继续下一篇，不等待、不自动重试。选择 pause 时，保留页面及检查点，进入 `waiting_for_user`。Edge 未安装、连接失败或标签关闭时暂停；页面内容未核验时不用于链接提取，但不阻断缓存及公开入口。报告须分别统计人工验证跳过数与成功数；队列执行完成不等于全部下载成功。跳过项保留恢复数据，普通恢复不重新入队。
 
 
 ## 验证缓冲与临时脚本

@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import logging
 import sys
-import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 from .access_policy import (
     POLICY_SKIP_PAID_KEEP_OA,
@@ -20,19 +17,11 @@ from .access_policy import (
 )
 from .broker import BrokerManager, default_runtime_dir
 from .browser import BrowserAuthorizer, ProfileInUseError
-from .config import (
-    ConfigError,
-    GlobalConfig,
-    GlobalConfigStore,
-    load_elsevier_credentials,
-    mask_secret,
-)
 from .doctor import run_doctor
 from .doi import InvalidDoiError, doi_slug, normalize_doi
-from .elsevier import ElsevierApiClient
 from .job_runner import run_broker, run_job
 from .job_store import JobStore
-from .papers import PaperJob, PapersFileError, load_paper_jobs
+from .papers import PaperJob, PapersFileError, load_paper_jobs, validate_supplement_urls
 from .pipeline import Harvester
 
 
@@ -61,6 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     download.add_argument("--email", help="Crossref/OpenAlex 礼貌池联系邮箱。")
     download.add_argument("--results-csv", type=Path, help="补充材料逐附件结果 CSV 的绝对路径。")
+    download.add_argument(
+        "--supplement-url",
+        action="append",
+        default=[],
+        metavar="DOI=URL",
+        help="显式指定已核验的 SI HTTPS 直链；可重复传入，任务恢复时沿用。",
+    )
     download.add_argument(
         "--overwrite", action="store_true", help="已禁用：下载任务始终复用有效文件。"
     )
@@ -149,37 +145,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     auth.add_argument("--verbose", action="store_true", help="输出调试日志。")
 
-    elsevier_setup = subparsers.add_parser(
-        "elsevier-setup",
-        help="配置本机全局 Elsevier API Key，并验证 XML/object-EID 下载链。",
-    )
-    elsevier_setup.add_argument(
-        "--set-key", action="store_true", help="以隐藏输入录入并使用 DPAPI 保存 API Key。"
-    )
-    elsevier_setup.add_argument(
-        "--set-inst-token",
-        action="store_true",
-        help="以隐藏输入录入可选的 Elsevier institutional token。",
-    )
-    elsevier_setup.add_argument("--proxy-url", help="direct 失败后的可选 HTTP(S) 代理。")
-    elsevier_setup.add_argument("--clear-key", action="store_true", help="清除本地 API Key。")
-    elsevier_setup.add_argument(
-        "--clear-inst-token", action="store_true", help="清除本地 institutional token。"
-    )
-    elsevier_setup.add_argument(
-        "--clear-proxy", action="store_true", help="清除 Elsevier 代理配置。"
-    )
-    elsevier_setup.add_argument("--show", action="store_true", help="显示脱敏配置状态。")
-    elsevier_setup.add_argument(
-        "--validate", action="store_true", help="验证 FULL XML 与 object-EID PDF 下载链。"
-    )
-    elsevier_setup.add_argument(
-        "--test-doi",
-        default="10.1016/j.watres.2024.121507",
-        help="仅用于验证的 Elsevier DOI。",
-    )
-    elsevier_setup.add_argument("--verbose", action="store_true", help="输出调试日志。")
-
     jobs = subparsers.add_parser("jobs", help="查看、恢复或取消可恢复任务。")
     jobs.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
     job_commands = jobs.add_subparsers(dest="jobs_command", required=True)
@@ -202,8 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
                 help="同时重试普通失败条目；用于审查后的定向恢复。",
             )
 
-    doctor = subparsers.add_parser("doctor", help="检查配置、任务库、浏览器和出版社规则。")
-    doctor.add_argument("--network", action="store_true", help="执行真实 Elsevier API 验证。")
+    doctor = subparsers.add_parser("doctor", help="检查任务库、浏览器和出版社规则。")
     doctor.add_argument("--json", action="store_true", help="输出 JSON。")
     doctor.add_argument("--target-dir", type=Path, help="额外检查目标论文目录可写性。")
     doctor.add_argument("--verbose", action="store_true", help="输出调试日志。")
@@ -279,7 +243,6 @@ def main(argv: list[str] | None = None) -> int:
         "auth",
         "access",
         "download",
-        "elsevier-setup",
         "jobs",
         "doctor",
         "job-worker",
@@ -293,11 +256,8 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-    if args.command == "elsevier-setup":
-        return _run_elsevier_setup(args)
-
     if args.command == "doctor":
-        result = run_doctor(network=args.network, target_dir=args.target_dir)
+        result = run_doctor(target_dir=args.target_dir)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
@@ -358,6 +318,20 @@ def main(argv: list[str] | None = None) -> int:
     browser_display = args.browser_display or ("off" if args.headless else "foreground")
     if args.results_csv and not (args.supplements or args.supplements_only):
         raise SystemExit("--results-csv 需要 --supplements 或 --supplements-only。")
+    if args.supplement_url and not (args.supplements or args.supplements_only):
+        raise SystemExit("--supplement-url 需要 --supplements 或 --supplements-only。")
+    raw_supplement_urls: dict[str, list[str]] = {}
+    for value in args.supplement_url:
+        raw_doi, separator, url = value.partition("=")
+        if not separator:
+            raise SystemExit("--supplement-url 格式必须为 DOI=URL。")
+        raw_supplement_urls.setdefault(raw_doi.strip(), []).append(url.strip())
+    try:
+        supplement_urls = validate_supplement_urls(
+            raw_supplement_urls, {doi for doi, _paper_job in tasks}
+        )
+    except PapersFileError as exc:
+        raise SystemExit(str(exc)) from exc
     if challenge_policy is None:
         challenge_policy = "skip" if args.headless else "pause"
     challenge_timeout = (
@@ -420,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             "access_environment": args.access_environment or "default",
             "supplements": args.supplements,
             "supplements_only": args.supplements_only,
+            "supplement_urls": supplement_urls,
             "results_csv": str(args.results_csv.resolve()) if args.results_csv else "",
         },
         workbook_path=args.workbook,
@@ -436,110 +411,6 @@ def main(argv: list[str] | None = None) -> int:
     status = run_job(job_id, store=store)
     print(f"任务结束：{job_id}；状态：{status}", flush=True)
     return 0 if status == "completed" else 2
-
-
-def _run_elsevier_setup(args: argparse.Namespace) -> int:
-    """维护全局 Elsevier 配置，并按需进行无持久输出的验证。"""
-    store = GlobalConfigStore()
-    try:
-        config = store.load()
-    except ConfigError as exc:
-        recovery_requested = any(
-            (
-                args.set_key,
-                args.set_inst_token,
-                args.clear_key,
-                args.clear_inst_token,
-                args.clear_proxy,
-                args.proxy_url is not None,
-            )
-        )
-        if not recovery_requested:
-            print(f"[失败] {exc} 请使用 --set-key 重新录入配置。")
-            return 2
-        print(f"[警告] 原配置无法读取，将以本次输入重建：{exc}")
-        config = GlobalConfig()
-    changed = False
-    if args.set_key:
-        value = getpass.getpass("Elsevier API Key（隐藏输入）：").strip()
-        if not value:
-            print("[失败] API Key 不能为空。")
-            return 2
-        config.elsevier.api_key = value
-        changed = True
-    if args.set_inst_token:
-        value = getpass.getpass("Elsevier Inst Token（隐藏输入）：").strip()
-        if not value:
-            print("[失败] Inst Token 不能为空。")
-            return 2
-        config.elsevier.inst_token = value
-        changed = True
-    if args.proxy_url is not None:
-        proxy_url = args.proxy_url.strip()
-        parsed_proxy = urlparse(proxy_url)
-        if parsed_proxy.scheme not in {"http", "https"} or not parsed_proxy.netloc:
-            print("[失败] --proxy-url 必须是完整的 http:// 或 https:// URL。")
-            return 2
-        config.elsevier.proxy_url = proxy_url
-        changed = True
-    if args.clear_key:
-        config.elsevier.api_key = ""
-        changed = True
-    if args.clear_inst_token:
-        config.elsevier.inst_token = ""
-        changed = True
-    if args.clear_proxy:
-        config.elsevier.proxy_url = ""
-        changed = True
-    if changed:
-        try:
-            store.save(config)
-        except ConfigError as exc:
-            print(f"[失败] {exc}")
-            return 2
-
-    try:
-        credentials = load_elsevier_credentials(store)
-    except ConfigError as exc:
-        print(f"[失败] {exc}")
-        return 2
-
-    if args.show or changed or not args.validate:
-        print(f"配置文件：{store.path}")
-        print(f"API Key：{mask_secret(credentials.api_key)}")
-        print(f"Inst Token：{mask_secret(credentials.inst_token)}")
-        print(f"代理：{credentials.proxy_url or '(未配置，使用 direct)'}")
-
-    if not args.validate:
-        return 0
-    if not credentials.api_key:
-        print("[失败] 尚未配置 Elsevier API Key。")
-        return 2
-    try:
-        doi = normalize_doi(args.test_doi)
-    except InvalidDoiError as exc:
-        print(f"[失败] {exc}")
-        return 2
-    with tempfile.TemporaryDirectory(prefix="autopaper-elsevier-validate-") as directory:
-        destination = Path(directory) / "article.pdf"
-        result = ElsevierApiClient().download(
-            doi=doi,
-            destination=destination,
-            api_key=credentials.api_key,
-            inst_token=credentials.inst_token,
-            proxy_url=credentials.proxy_url,
-        )
-    if not result.success:
-        print(f"[失败] Elsevier API 验证失败：{result.reason}")
-        if result.reason == "api_configuration_error":
-            print(
-                "请在 Elsevier Developer Portal 检查当前 Key 的 "
-                "ScienceDirect / Article Retrieval API 配置。"
-            )
-        return 2
-    warning = f"；警告：{','.join(result.warnings)}" if result.warnings else ""
-    print(f"[成功] Elsevier XML/object-EID 下载链可用；来源：{result.source}{warning}")
-    return 0
 
 
 def _run_jobs(args: argparse.Namespace) -> int:

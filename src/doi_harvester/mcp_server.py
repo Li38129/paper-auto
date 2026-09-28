@@ -12,7 +12,7 @@ from typing import Any
 from .broker import BrokerManager, default_runtime_dir
 from .job_runner import run_job
 from .job_store import JobStore
-from .papers import load_paper_jobs
+from .papers import PapersFileError, load_paper_jobs, validate_supplement_urls
 from .search import LiteratureSearchClient
 
 
@@ -43,6 +43,7 @@ def download(
     detach: bool = False,
     supplements: bool = False,
     supplements_only: bool = False,
+    supplement_urls: dict[str, list[str]] | None = None,
     browser_display: str = "foreground",
     challenge_policy: str = "pause",
 ) -> dict[str, object]:
@@ -50,11 +51,19 @@ def download(
         raise ValueError("challenge_policy 必须为 pause、skip 或 fail-fast。")
     if supplements and supplements_only:
         raise ValueError("supplements 与 supplements_only 不能同时开启。")
+    if supplement_urls and not (supplements or supplements_only):
+        raise ValueError("supplement_urls 需要开启 supplements 或 supplements_only。")
     if browser_display not in {"foreground", "off"}:
         raise ValueError("browser_display 必须为 foreground 或 off。")
     papers_path = _absolute_path(papers_file, "papers_file")
     output_path = _absolute_path(output_dir, "output_dir")
     jobs = load_paper_jobs(papers_path)
+    try:
+        validated_supplement_urls = validate_supplement_urls(
+            supplement_urls, {item.doi for item in jobs}
+        )
+    except PapersFileError as exc:
+        raise ValueError(str(exc)) from exc
     for item in jobs:
         try:
             item.folder_path.resolve().relative_to(output_path)
@@ -90,6 +99,7 @@ def download(
             "keep_browser_open": challenge_policy == "pause",
             "supplements": supplements,
             "supplements_only": supplements_only,
+            "supplement_urls": validated_supplement_urls,
             "browser_display": browser_display,
         },
     )

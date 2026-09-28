@@ -110,8 +110,6 @@ _PROFILES = (
         prefixes=("10.1016/",),
         domains=("sciencedirect.com", "elsevier.com"),
         browser="https://www.sciencedirect.com/",
-        support="verified_api",
-        verified="2026-09-17",
     ),
     _profile(
         "ieee",

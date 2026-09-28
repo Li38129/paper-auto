@@ -249,6 +249,84 @@ def test_browser_surfaces_cloudflare_challenge(
     assert result.reason == "challenge_required"
 
 
+def test_article_mentioning_captcha_with_pdf_link_is_not_a_challenge() -> None:
+    page = SignalPage(body="The study discusses captcha systems.", pdf_count=1)
+    assert classify_page(page) == "ready"
+
+
+def test_visible_sign_in_title_requires_authentication() -> None:
+    page = SignalPage(title="Sign in to your institution", body="Enter your account details")
+    assert classify_page(page) == "authentication_required"
+
+
+@pytest.mark.parametrize("http_status", [401, 403, 429])
+def test_normal_wiley_page_pdf_denial_does_not_request_verification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_status: int
+) -> None:
+    from doi_harvester import visible_browser
+
+    page = SignalPage(
+        title="A Mesoporous Iron-Based Fluoride Cathode",
+        body="Full Paper Full Access Abstract PDF",
+        url="https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.201002213",
+        pdf_count=1,
+    )
+    monkeypatch.setattr(visible_browser, "work_page", lambda *_: page)
+    monkeypatch.setattr(visible_browser, "_page_matches_doi", lambda *_: True)
+    request_calls: list[str] = []
+
+    class DeniedResponse:
+        status = http_status
+        ok = False
+        url = "https://advanced.onlinelibrary.wiley.com/doi/pdf/10.1002/adfm.201002213"
+
+    class DeniedRequest:
+        def get(self, url: str, **_kwargs: object) -> DeniedResponse:
+            request_calls.append(url)
+            return DeniedResponse()
+
+    context = types.SimpleNamespace(request=DeniedRequest())
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path / "profile")
+    monkeypatch.setattr(downloader, "_collect_urls", lambda **_: [DeniedResponse.url])
+    monkeypatch.setattr(downloader, "_download_from_surfaces", lambda **_: None)
+    monkeypatch.setattr(downloader, "_download_by_click", lambda **_: None)
+
+    result = downloader._download_in_context(
+        context=context,
+        doi="10.1002/adfm.201002213",
+        destination=tmp_path / "article.pdf",
+        temporary=tmp_path / "article.part",
+        candidate_urls=[],
+    )
+
+    assert len(request_calls) == 2
+    assert result.reason == ("pdf_rate_limited" if http_status == 429 else "pdf_request_denied")
+    assert result.status_code == http_status
+
+
+def test_disconnected_edge_reports_browser_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from doi_harvester import browser as browser_module
+
+    install_fake_playwright(monkeypatch, body=b"")
+    monkeypatch.setattr(browser_module, "_read_cdp_endpoint", lambda *_: "http://localhost:9222")
+
+    def disconnected(*_args: object, **_kwargs: object) -> None:
+        raise ConnectionError("disconnected")
+
+    monkeypatch.setattr(FakeChromium, "connect_over_cdp", disconnected)
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path / "profile", channel="msedge")
+
+    result = downloader.download(
+        doi="10.1002/adfm.201002213",
+        destination=tmp_path / "article.pdf",
+        candidate_urls=[],
+    )
+
+    assert result.reason.startswith("browser_display_unavailable:")
+
+
 def test_browser_pause_policy_waits_on_challenge(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -6,12 +6,46 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .doi import InvalidDoiError, normalize_doi
 
 
 class PapersFileError(ValueError):
     """papers.json 不符合交换格式。"""
+
+
+def validate_supplement_urls(
+    raw_urls: Mapping[str, object] | None,
+    requested_dois: set[str],
+) -> dict[str, list[str]]:
+    """验证任务中显式提供的 SI 附件直链。"""
+    normalized: dict[str, list[str]] = {}
+    for raw_doi, raw_values in (raw_urls or {}).items():
+        try:
+            doi = normalize_doi(str(raw_doi))
+        except InvalidDoiError as exc:
+            raise PapersFileError(f"SI 直链对应的 DOI 无效：{raw_doi}") from exc
+        if doi not in requested_dois:
+            raise PapersFileError(f"SI 直链 DOI 不在本次任务中：{doi}")
+        values = [raw_values] if isinstance(raw_values, str) else raw_values
+        if not isinstance(values, list) or not values or len(values) > 20:
+            raise PapersFileError(f"{doi} 的 SI 直链必须是 1–20 项 URL。")
+        urls: list[str] = []
+        for value in values:
+            url = str(value or "").strip()
+            parsed = urlparse(url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+            ):
+                raise PapersFileError(f"SI 直链必须是有效 HTTPS URL：{url}")
+            if url not in urls:
+                urls.append(url)
+        normalized[doi] = urls
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,7 +10,6 @@ def test_registry_contains_twenty_one_unique_publishers() -> None:
     assert len(aliases) == len(set(aliases))
     assert all(profile.support_level for profile in PUBLISHER_PROFILES.values())
     assert {profile.support_level for profile in PUBLISHER_PROFILES.values()} <= {
-        "verified_api",
         "verified_http",
         "verified_browser",
         "configured_only",
@@ -24,6 +23,7 @@ def test_registry_contains_twenty_one_unique_publishers() -> None:
 
 def test_infer_elsevier_from_doi_publisher_or_domain() -> None:
     assert infer_publisher_profile("10.1016/example").key == "elsevier"
+    assert infer_publisher_profile("10.1016/example").support_level == "configured_only"
     assert infer_publisher_profile("10.0000/example", publisher="Elsevier BV").key == "elsevier"
     assert (
         infer_publisher_profile(

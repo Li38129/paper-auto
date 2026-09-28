@@ -1,15 +1,14 @@
 # DOI Harvester
 
-一个面向科研工作流的 DOI 文献下载器。当前版本聚焦期刊正文 PDF，支持 DOI 规范化、Elsevier API、配置驱动的出版社 Profile、可恢复任务、浏览器会话串行化、MCP 工具和 Excel 文献索引。
+一个面向科研工作流的 DOI 文献下载器。当前版本聚焦期刊正文 PDF，支持 DOI 规范化、开放获取检索、配置驱动的出版社 Profile、可恢复任务、浏览器会话串行化、MCP 工具和 Excel 文献索引。
 
 > 项目只使用开放获取入口、出版社允许的下载入口或用户本人已有的机构订阅会话，不绕过付费墙或站点安全验证。
 
 ## 当前能力
 
 - 输入裸 DOI、DOI URL、重复 `--doi` 参数或 UTF-8 DOI 文本文件；
-- 固定执行“有效缓存 → OpenAlex OA → Elsevier API → Crossref/出版社入口 → 浏览器兜底”；
-- Elsevier 使用 `view=FULL → MAIN object EID → PDF`，凭据由当前 Windows 用户的 DPAPI 加密；
-- 内置 21 家出版社 Profile，并明确区分 API、HTTP、浏览器已验证和仅配置状态；
+- 固定执行“有效缓存 → OpenAlex OA → Crossref/出版社入口 → 浏览器兜底”；
+- 内置 21 家出版社 Profile，并明确区分 HTTP、浏览器已验证和仅配置状态；
 - SQLite 任务支持后台执行、心跳、stalled 检测、恢复、取消和阶段日志；
 - 所有下载入口自动创建可恢复任务，逐篇保存数据库检查点，按批次同步报告和 Excel；
 - 本机机构访问策略支持按 ISSN、期刊名和年份跳过付费入口，同时保留 OA 获取；
@@ -43,23 +42,9 @@ cd paper-auto
 .\scripts\check.ps1
 ```
 
-## 一次配置 Elsevier API
+## 下载状态说明
 
-API Key 是当前 Windows 用户的全局配置，一次录入后可供所有 AutoPaper 项目使用。密钥保存到 `%LOCALAPPDATA%\AutoPaper\config.json`，其中只有 DPAPI 密文；命令行、报告和日志只显示末四位掩码。Inst Token 仅在图书馆明确提供时才需要配置。
-
-```powershell
-.\scripts\doi-harvester.ps1 elsevier-setup --set-key --show
-.\scripts\doi-harvester.ps1 elsevier-setup --validate
-```
-
-`--validate` 默认使用 `10.1016/j.watres.2024.121507`，文件只写入系统临时目录并在结束后清理。也可使用 `--set-inst-token`、`--proxy-url URL`、`--clear-key`、`--clear-inst-token` 和 `--clear-proxy`。不提供明文 `--api-key` 参数。
-
-读取优先级为 `ELSEVIER_API_KEY` / `ELS_API_KEY` 环境变量，其次是 DPAPI 本地配置。网络先使用 `trust_env=False` 的 direct 路由，让校园网、学校 VPN 或规则 VPN 决定实际出口；只有配置了专用代理且 direct 遇到连接、超时或授权错误时才尝试代理。项目不保存校园账号，也不处理验证码。
-
-浏览器或 Windows 系统代理不会被 direct 路由自动继承；若规则 VPN 仅提供本机 HTTP
-代理，需要使用 `--proxy-url http://127.0.0.1:端口` 显式配置。返回
-`AUTHENTICATION_ERROR` 时会标记为 `api_configuration_error`，用于区分开发者应用/API
-权限配置问题与论文订阅不足；返回 `NOT_ENTITLED` 才标记为机构订阅问题。
+正文 PDF 或补充材料的独立请求返回 401、403、429 时，报告保留该请求的状态码并尝试可用的浏览器路径。只有当前可见页面出现验证码或登录内容时，任务才按 `--challenge-policy` 请求人工处理。浏览器未连接或工作标签不可用会报告浏览器故障，不视为需要验证。
 
 ## 在 Codex 中完成检索与下载
 
@@ -101,7 +86,7 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 
 可恢复任务（默认前台监督；显式增加 `--detach` 才转入后台）：
 
-下载默认使用 `--browser-display foreground`，每篇先在外部 Edge 专用工作标签请求对应 DOI。无需焦点或出版社加载成功，导航记录与真实标签绑定即可继续缓存/HTTP/API；浏览器提取链接仍须完整核验内容 DOI。验证先最多缓冲10秒，再按 pause/skip 处理。页面关闭或 Edge 不可用时暂停。显式 off/headless 保留高级兼容。
+下载默认使用 `--browser-display foreground`，每篇先在外部 Edge 专用工作标签请求对应 DOI。无需焦点或出版社加载成功，导航记录与真实标签绑定即可继续缓存、公开接口与 HTTP；浏览器提取链接仍须完整核验内容 DOI。验证先最多缓冲10秒，再按 pause/skip 处理。页面关闭或 Edge 不可用时暂停。显式 off/headless 保留高级兼容。
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
@@ -140,12 +125,11 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 
 访问顺序为有效缓存、可靠 OA、访问策略、出版社付费入口。规则保存在 `%LOCALAPPDATA%\AutoPaper\access-policies.json`，可用 `AUTOPAPER_ACCESS_ENVIRONMENT` 区分校园网或学校 VPN。自动探测规则应设置过期时间；单篇失败不会自动变成整刊规则。
 
-运行诊断；默认不访问出版社，只有 `--network` 才执行真实 Elsevier 探针：
+运行本机诊断：
 
 ```powershell
 .\scripts\doi-harvester.ps1 doctor
 .\scripts\doi-harvester.ps1 doctor --target-dir "C:\papers"
-.\scripts\doi-harvester.ps1 doctor --network
 ```
 
 ## MCP 工具
@@ -161,7 +145,7 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 服务器提供：
 
 - `search(query, year_from, year_to, limit)`：OpenAlex 主检索、Crossref 补充并去重；
-- `download(papers_file, output_dir, report_dir, browser_fallback, detach, supplements, supplements_only, browser_display, challenge_policy)`：创建任务并返回 `job_id`；
+- `download(papers_file, output_dir, report_dir, browser_fallback, detach, supplements, supplements_only, supplement_urls, browser_display, challenge_policy)`：创建任务并返回 `job_id`；
 - `job_status(job_id)`：返回状态、计数和需要人工处理的 DOI；
 - `update_excel(workbook_path, records_path, report_path, resolved_path)`：复用仓库 Skill 的工作簿脚本。
 
@@ -180,6 +164,18 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 
 `papers.json` 中每条记录需包含 `rank`、`doi` 和绝对路径 `folder_path`；可核验时填写 `title`。交换文件放在 `temp\doi-harvester\jobs`，不要放入论文数据目录。
 默认只下载期刊正文；`--supplements` 下载正文和补充材料，`--supplements-only` 只下载补充材料，两者互斥。两种 SI 模式均支持可恢复任务、逐附件报告和 `--results-csv`。固定编号 CSV 可先用 `scripts/si-csv-batch.py` 导入，保留原序号并生成 Excel、目标 CSV 和 `papers.json`。补充材料保存在每篇目录的 `supplements` 子目录。
+
+对于出版社页面已明确列出、但自动发现规则未识别的附件，可重复传入已核验的 HTTPS 直链；下载仍使用 SI 校验、缓存、哈希和检查点：
+
+```powershell
+.\scripts\doi-harvester.ps1 download `
+  --papers-file "$PWD\temp\doi-harvester\jobs\<任务ID>\papers.json" `
+  --output-dir "C:\papers" `
+  --supplements-only `
+  --supplement-url "10.1002/example=https://publisher.example/path/to/supporting-information.pdf"
+```
+
+同一 DOI 可多次传 `--supplement-url DOI=URL`。MCP `download` 接受等价的 `supplement_urls` 字典，键为本次任务中的 DOI，值为 HTTPS URL 数组。直链会持久化在任务配置中，断点恢复沿用原值；不能传入任务外 DOI、非 HTTPS 链接或正文下载模式。
 
 ACS、Elsevier 或 RSC 等需要已有订阅会话的出版社：
 

@@ -2,6 +2,7 @@ import base64
 import json
 from pathlib import Path
 
+import pytest
 import requests
 
 from doi_harvester.supplements import (
@@ -54,6 +55,70 @@ def test_wiley_supplement_links_include_non_pdf_and_deduplicate() -> None:
     assert parser.urls == [link]
 
 
+def test_legacy_wiley_vch_supporting_pdf_link_is_detected_without_anchor_label() -> None:
+    parser = _SupplementLinks("https://onlinelibrary.wiley.com/doi/10.1002/anie.200701144")
+    link = "https://www.wiley-vch.de/contents/jc_2002/2007/z701144_s.pdf"
+    parser.feed(f'<a href="{link}">www.wiley-vch.de</a>')
+
+    assert parser.urls == [link]
+
+
+def test_wiley_google_scholar_reference_link_is_not_a_supplement() -> None:
+    parser = _SupplementLinks("https://onlinelibrary.wiley.com/doi/10.1002/anie.202401779")
+    parser.feed(
+        '<a href="/action/getFTRLinkout?url=http%3A%2F%2Fscholar.google.com%2Fscholar%3Fq%3D'
+        'supplementary%2Bcrystallographic%2Bdata&doi=10.1002%2Fanie.202401779">'
+        "Google Scholar</a>"
+    )
+    assert parser.urls == []
+
+
+def test_google_scholar_lookup_reference_with_supp_file_query_is_not_a_supplement() -> None:
+    from doi_harvester.supplements import _SupplementLinks
+
+    parser = _SupplementLinks("https://link.springer.com/article/10.1007/example")
+    parser.feed(
+        '<a href="http://scholar.google.com/scholar_lookup?title=Effects&amp;'
+        'doi=10.1021%2FACSAMI.8B17656%2FSUPPL_FILE%2FAM8B17656_SI_001.PDF">'
+        "View supplementary information</a>"
+    )
+
+    assert parser.urls == []
+
+
+def test_cited_other_article_suppl_file_is_not_a_supplement() -> None:
+    parser = _SupplementLinks(
+        "https://www.sciencedirect.com/science/article/pii/S123", doi="10.1016/j.example.2024.1"
+    )
+    parser.feed(
+        '<a href="https://doi.org/10.1021/ACS.CHEMMATER.0C04650/SUPPL_FILE/CM0C04650_SI_001.PDF">'
+        "Supporting Information</a>"
+    )
+    parser.feed(
+        '<a href="https://doi.org/10.1021%2FACS.CHEMMATER.0C04650%2FSUPPL_FILE%2FCM0C04650_SI_001.PDF">'
+        "Supporting Information</a>"
+    )
+    assert parser.urls == []
+
+
+def test_current_article_suppl_file_is_kept() -> None:
+    parser = _SupplementLinks(
+        "https://pubs.acs.org/doi/10.1021/acsaem.8b01899", doi="10.1021/acsaem.8b01899"
+    )
+    link = "https://doi.org/10.1021%2FACSAEM.8B01899%2FSUPPL_FILE%2FAE8B01899_SI_001.PDF"
+    parser.feed(f'<a href="{link}">Supporting Information</a>')
+    assert parser.urls == [link]
+
+
+def test_supplementary_information_article_anchor_is_not_a_file() -> None:
+    parser = _SupplementLinks("https://pubs.acs.org/doi/10.1021/acsaem.8b01899")
+    parser.feed(
+        '<a href="http://www.nature.com/nmat/journal/v16/n5/abs/nmat4821.html#supplementary-information">'
+        "Supplementary Information</a>"
+    )
+    assert parser.urls == []
+
+
 def test_figshare_article_page_without_si_label_is_not_an_attachment() -> None:
     parser = _SupplementLinks("https://pubs.acs.org/doi/10.1021/example")
     parser.feed(
@@ -80,7 +145,9 @@ def test_http_supplement_requires_authorization_on_challenge(tmp_path: Path, mon
         def __init__(self):
             self.headers = {}
 
-        def get(self, *_args, **_kwargs):
+        def get(self, url, **_kwargs):
+            if url.startswith("https://www.ebi.ac.uk/"):
+                raise requests.ConnectionError("mocked Europe PMC unavailable")
             return FakeResponse()
 
     monkeypatch.setattr("doi_harvester.supplements.requests.Session", FakeSession)
@@ -88,9 +155,9 @@ def test_http_supplement_requires_authorization_on_challenge(tmp_path: Path, mon
     status, artifacts, attempts = downloader.download(
         doi="10.1002/advs.76317", article_dir=tmp_path
     )
-    assert status == "challenge_required"
+    assert status == "browser_unavailable"
     assert artifacts == []
-    assert attempts[0].reason == "challenge_required"
+    assert any(attempt.reason == "page_request_denied" for attempt in attempts)
 
 
 def test_http_supplement_keeps_distinct_files_with_same_name(tmp_path: Path) -> None:
@@ -164,6 +231,56 @@ def test_http_supplement_reports_partial_success(tmp_path: Path) -> None:
     assert status == "partial"
     assert len(artifacts) == 1
     assert [item.success for item in attempts] == [True, False]
+
+
+def test_explicit_publisher_url_uses_streaming_validation_and_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    body = b"%PDF-1.7\nverified publisher SI"
+
+    class FakeResponse:
+        status_code = 200
+        headers = {
+            "content-type": "application/pdf",
+            "content-disposition": 'attachment; filename="verified-si.pdf"',
+        }
+        url = "https://www.wiley-vch.de/contents/verified-si.pdf"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size: int):
+            yield body
+
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+
+        def get(self, url: str, **_kwargs):
+            assert url == "https://www.wiley-vch.de/contents/verified-si.pdf"
+            return FakeResponse()
+
+    monkeypatch.setattr("doi_harvester.supplements.requests.Session", FakeSession)
+    status, artifacts, attempts = HttpSupplementDownloader().download(
+        doi="10.1002/example",
+        article_dir=tmp_path,
+        explicit_urls=["https://www.wiley-vch.de/contents/verified-si.pdf"],
+    )
+
+    assert status == "downloaded"
+    assert len(artifacts) == 1
+    saved = Path(artifacts[0].path)
+    assert saved.parent.name == "supplements"
+    assert saved.read_bytes() == body
+    assert len(artifacts[0].sha256) == 64
+    assert attempts[0].success
+    assert attempts[0].url.endswith("verified-si.pdf")
 
 
 class StreamResponse:
@@ -312,16 +429,24 @@ def test_browser_stream_accepts_office_archive(tmp_path):
     assert zipfile.is_zipfile(files[0].path)
 
 
-def test_browser_attachment_authorization_is_not_generic_failure(tmp_path):
+@pytest.mark.parametrize(
+    ("http_status", "expected_reason"),
+    [(401, "attachment_request_denied"), (403, "attachment_request_denied"),
+     (429, "attachment_rate_limited")],
+)
+def test_browser_attachment_denial_is_not_a_visible_challenge(
+    tmp_path, http_status, expected_reason
+):
     class AuthPage:
         def evaluate(self, *_):
-            return {"status": 403}
+            return {"status": http_status}
 
     status, files, attempts = HttpSupplementDownloader()._download_browser_urls(
         AuthPage(), ["https://cdn.test/si.docx"], tmp_path
     )
-    assert status == "challenge_required" and not files
-    assert attempts[0].status_code == 403
+    assert status == "not_downloadable" and not files
+    assert attempts[0].reason == expected_reason
+    assert attempts[0].status_code == http_status
 
 
 def test_browser_discovery_reuses_verified_page_and_downloads_via_http(monkeypatch, tmp_path):
@@ -387,7 +512,7 @@ def test_browser_gate_stops_remaining_attachment_requests(tmp_path):
     status, files, _ = HttpSupplementDownloader()._download_browser_urls(
         page, ["https://cdn.test/one.docx", "https://cdn.test/two.docx"], tmp_path
     )
-    assert status == "challenge_required" and not files
+    assert status == "not_downloadable" and not files
     assert page.calls == 1
 
 
@@ -408,7 +533,7 @@ def test_http_gate_preserves_files_and_stops_remaining_requests(tmp_path):
     status, files, _ = HttpSupplementDownloader()._download_urls(
         SimpleNamespace(get=get), urls, tmp_path
     )
-    assert status == "challenge_required" and len(files) == 1
+    assert status == "partial" and len(files) == 1
     assert calls == urls[:2]
     assert Path(files[0].path).read_bytes() == b"a,b\n1,2"
 
@@ -441,9 +566,67 @@ def test_attachment_gate_retries_once_after_verified_page_recovers(monkeypatch, 
         tmp_path,
         doi="10.1021/example",
     )
-    assert status == "downloaded" and len(files) == 1
-    assert len(calls) == 2 and waits == [True]
-    assert [attempt.success for attempt in attempts] == [False, False, True]
+    assert status == "not_downloadable" and not files
+    assert len(calls) == 1 and waits == [True]
+    assert [attempt.success for attempt in attempts] == [False, False]
+
+
+def test_attachment_failure_after_clear_verification_does_not_pause_queue(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    calls = []
+
+    class Page(StreamPage):
+        url = "https://pubs.acs.org/doi/10.1021/example"
+
+        def evaluate(self, script, *args):
+            if "querySelectorAll" in script:
+                return ["10.1021/example"]
+            return {"status": 403}
+
+    def get(url, **_):
+        calls.append(url)
+        return StreamResponse(url, status=403)
+
+    monkeypatch.setattr("doi_harvester.browser.wait_for_verification", lambda _: "authenticated")
+    status, files, attempts = HttpSupplementDownloader()._download_discovered_urls(
+        SimpleNamespace(get=get),
+        Page(),
+        ["https://cdn.test/data.pdf"],
+        tmp_path,
+        doi="10.1021/example",
+    )
+
+    assert status == "not_downloadable" and not files
+    assert len(calls) == 1
+    assert len(attempts) == 2
+    assert all(attempt.reason == "attachment_request_denied" for attempt in attempts)
+
+
+def test_attachment_denial_with_visible_challenge_requests_verification(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    class Page(StreamPage):
+        url = "https://pubs.acs.org/doi/10.1021/example"
+
+        def evaluate(self, script, *args):
+            if "querySelectorAll" in script:
+                return ["10.1021/example"]
+            return {"status": 403}
+
+    monkeypatch.setattr(
+        "doi_harvester.browser.wait_for_verification", lambda _: "challenge_required"
+    )
+    status, files, attempts = HttpSupplementDownloader()._download_discovered_urls(
+        SimpleNamespace(get=lambda url, **_: StreamResponse(url, status=403)),
+        Page(),
+        ["https://cdn.test/data.csv"],
+        tmp_path,
+        doi="10.1021/example",
+    )
+
+    assert status == "challenge_required" and not files
+    assert all(attempt.reason == "attachment_request_denied" for attempt in attempts)
 
 
 def test_attachment_gate_does_not_repeat_same_wait_or_retry_wrong_doi(monkeypatch, tmp_path):
@@ -474,5 +657,135 @@ def test_attachment_gate_does_not_repeat_same_wait_or_retry_wrong_doi(monkeypatc
         tmp_path,
         doi="10.1021/example",
     )
-    assert status == "challenge_required" and not files
+    assert status == "not_downloadable" and not files
     assert len(calls) == 1 and waits == [True]
+
+
+def test_pmc_open_data_fallback_extracts_only_article_supplement_files(monkeypatch, tmp_path):
+    doi = "10.3390/ma13071719"
+    supplement = b"%PDF-1.7\nverified supplementary file"
+    bucket = "https://pmc-oa-opendata.s3.amazonaws.com"
+    xml_url = f"{bucket}/PMC7178664.1/PMC7178664.1.xml?md5=xml-hash"
+    supplement_url = f"{bucket}/PMC7178664.1/materials-13-01719-s001.pdf?md5=supplement-hash"
+
+    class FakeResponse:
+        def __init__(self, url, *, status=200, body=b"", payload=None, content_type=""):
+            self.url = url
+            self.status_code = status
+            self.body = body
+            self.payload = payload
+            self.headers = {"content-type": content_type}
+            self.text = body.decode("utf-8", errors="replace")
+            self.content = body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"http_{self.status_code}")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def json(self):
+            return self.payload
+
+        def iter_content(self, chunk_size=1024 * 1024):
+            for start in range(0, len(self.body), chunk_size):
+                yield self.body[start : start + chunk_size]
+
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+
+        def get(self, url, **kwargs):
+            if url == "https://doi.org/10.3390/ma13071719":
+                return FakeResponse(url, status=403)
+            if url.endswith("/search"):
+                assert kwargs["params"]["query"] == f"DOI:{doi}"
+                return FakeResponse(
+                    url,
+                    payload={"resultList": {"result": [{"doi": doi, "pmcid": "PMC7178664"}]}},
+                )
+            if url == bucket:
+                assert kwargs["params"] == {"list-type": "2", "prefix": "PMC7178664."}
+                return FakeResponse(
+                    url,
+                    body=(
+                        b'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                        b"<Contents><Key>PMC7178664.1/PMC7178664.1.json</Key></Contents>"
+                        b"</ListBucketResult>"
+                    ),
+                    content_type="application/xml",
+                )
+            if url == f"{bucket}/PMC7178664.1/PMC7178664.1.json":
+                return FakeResponse(
+                    url,
+                    payload={
+                        "doi": doi,
+                        "pmcid": "PMC7178664",
+                        "version": 1,
+                        "xml_url": "s3://pmc-oa-opendata/PMC7178664.1/PMC7178664.1.xml?md5=xml-hash",
+                        "media_urls": [
+                            "s3://pmc-oa-opendata/PMC7178664.1/materials-13-01719-g001.jpg?md5=figure-hash",
+                            "s3://pmc-oa-opendata/PMC7178664.1/materials-13-01719-s001.pdf?md5=supplement-hash",
+                        ],
+                    },
+                )
+            if url == xml_url:
+                xml = (
+                    b'<article xmlns:xlink="http://www.w3.org/1999/xlink">'
+                    b"<body><supplementary-material><media "
+                    b'xlink:href="materials-13-01719-s001.pdf"/>'
+                    b"</supplementary-material></body></article>"
+                )
+                return FakeResponse(url, body=xml, content_type="application/xml")
+            if url == supplement_url:
+                return FakeResponse(
+                    url,
+                    body=supplement,
+                    content_type="application/pdf",
+                )
+            raise AssertionError(f"意外的请求地址：{url}")
+
+    monkeypatch.setattr("doi_harvester.supplements.requests.Session", FakeSession)
+    status, artifacts, attempts = HttpSupplementDownloader().download(doi=doi, article_dir=tmp_path)
+
+    assert status == "downloaded"
+    assert len(artifacts) == 1
+    assert artifacts[0].name == "materials-13-01719-s001.pdf"
+    assert Path(artifacts[0].path).read_bytes() == supplement
+    assert "g001.jpg" not in {item.name for item in artifacts}
+    assert attempts[0].source == "supplement:pmc_s3"
+    assert artifacts[0].url == supplement_url
+
+
+def test_europepmc_timeout_is_preserved_when_no_browser_is_available(monkeypatch, tmp_path):
+    doi = "10.3390/ma13071719"
+
+    class ArticleResponse:
+        status_code = 200
+        url = f"https://doi.org/{doi}"
+        text = "<html><body>Article page without SI links</body></html>"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+
+        def get(self, url, **_kwargs):
+            if url == ArticleResponse.url:
+                return ArticleResponse()
+            raise requests.ReadTimeout("mocked Europe PMC timeout")
+
+    monkeypatch.setattr("doi_harvester.supplements.requests.Session", FakeSession)
+    status, artifacts, attempts = HttpSupplementDownloader().download(doi=doi, article_dir=tmp_path)
+
+    assert status == "unconfirmed"
+    assert artifacts == []
+    assert len(attempts) == 1
+    assert attempts[0].source == "supplement:pmc_s3"
+    assert "ReadTimeout" in attempts[0].reason
