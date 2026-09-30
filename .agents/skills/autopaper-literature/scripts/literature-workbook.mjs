@@ -23,7 +23,11 @@ const HEADERS = [
   "下载来源",
   "首次收录时间",
   "最后更新时间",
+  "中科院分区",
+  "影响因子（IF）",
+  "分区/IF依据",
 ];
+const LEGACY_HEADERS = HEADERS.slice(0, 18);
 const SI_HEADERS = ["序号", "DOI", "SI状态", "附件名", "来源链接", "本地路径", "格式", "字节", "SHA256", "附件结果", "失败原因"];
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -197,6 +201,9 @@ function validateRecordsPayload(payload) {
       doi,
       year: Number.isInteger(raw.year) ? raw.year : "",
       journal: cleanText(raw.journal),
+      casQuartile: cleanText(raw.cas_quartile),
+      impactFactor: cleanText(raw.impact_factor),
+      journalMetricsSource: cleanText(raw.journal_metrics_source),
       paperType: cleanText(raw.paper_type),
       system: cleanText(raw.system),
       metric: cleanText(raw.metric),
@@ -254,15 +261,33 @@ function resolveTable(workbook) {
     throw new Error("工作簿缺少表格 LiteratureTable。");
   }
   const actualHeaders = table.getHeaderRowRange().values[0].map((value) => cleanText(value));
-  if (actualHeaders.length !== HEADERS.length || actualHeaders.some((value, index) => value !== HEADERS[index])) {
+  const current = actualHeaders.length === HEADERS.length
+    && actualHeaders.every((value, index) => value === HEADERS[index]);
+  const legacy = actualHeaders.length === LEGACY_HEADERS.length
+    && actualHeaders.every((value, index) => value === LEGACY_HEADERS[index]);
+  if (!current && !legacy) {
     throw new Error("LiteratureTable 字段与 AutoPaper 模板不兼容，原文件未修改。");
   }
-  return { sheet, table };
+  return { sheet, table, legacy };
 }
 
 function readTableRows(sheet) {
-  const values = sheet.getRange("A5:R5000").values ?? [];
+  const values = sheet.getRange(`A5:U5000`).values ?? [];
   return values.filter((row) => !isBlankRow(row)).map(rowToObject);
+}
+
+function expandLegacyTable(sheet, table, existingCount) {
+  const adjacent = sheet.getRange(`S4:U${Math.max(4, existingCount + 4)}`).values ?? [];
+  if (adjacent.some((row) => !isBlankRow(row))) {
+    throw new Error("旧版工作簿的 S:U 列已有内容，无法安全追加指标字段，原文件未修改。");
+  }
+  const previousStyle = table.style;
+  table.delete();
+  sheet.getRange("S4:U4").values = [HEADERS.slice(18)];
+  sheet.getRange("S4:U4").format.columnWidth = 24;
+  const expanded = sheet.tables.add(`A4:U${Math.max(4, existingCount + 4)}`, true, "LiteratureTable");
+  if (previousStyle) expanded.style = previousStyle;
+  return expanded;
 }
 
 function updateRowMap(rows) {
@@ -335,6 +360,9 @@ function upsertRecords(rows, payload, workbookPath, folderRoot) {
     row.DOI = record.doi || normalizeDoi(row.DOI);
     row["年份"] = record.year || row["年份"] || "";
     row["期刊"] = record.journal || row["期刊"] || "";
+    row["中科院分区"] = record.casQuartile || row["中科院分区"] || "未核实";
+    row["影响因子（IF）"] = record.impactFactor || row["影响因子（IF）"] || "未核实";
+    row["分区/IF依据"] = record.journalMetricsSource || row["分区/IF依据"] || "";
     row["文献类型"] = record.paperType || row["文献类型"] || "";
     row["体系/最佳组成"] = record.system || row["体系/最佳组成"] || "";
     row["关注指标"] = record.metric || row["关注指标"] || "";
@@ -546,9 +574,15 @@ async function main() {
 
   const artifact = await loadArtifactTool(nodeModulesPath);
   const workbook = await loadWorkbook(artifact, workbookPath, templatePath);
-  const { sheet, table } = resolveTable(workbook);
+  const { sheet, table, legacy } = resolveTable(workbook);
   const rows = readTableRows(sheet);
   const existingCount = rows.length;
+  if (legacy) {
+    for (const row of rows) {
+      row["中科院分区"] = "未核实";
+      row["影响因子（IF）"] = "未核实";
+    }
+  }
   let resolved = null;
 
   if (recordsPath) {
@@ -564,7 +598,8 @@ async function main() {
     updateSupplementSheet(workbook, results);
   }
 
-  writeRowsToTable(sheet, table, rows, existingCount);
+  const activeTable = legacy ? expandLegacyTable(sheet, table, existingCount) : table;
+  writeRowsToTable(sheet, activeTable, rows, existingCount);
   workbook.recalculate();
   await saveAtomically(artifact, workbook, workbookPath);
 
