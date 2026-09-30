@@ -13,7 +13,7 @@
   → literature-search-organizer 检索、筛选、去重、排序
   → temp/doi-harvester/jobs/papers.json（序号、DOI、题名、目标目录）
   → DOI Harvester 下载正文
-  → 每篇目录中只保存 article.pdf
+  → 每篇目录中保存与目录同名的正文 PDF
   → 可选 temp/batch-report.json 汇总审查信息
 ```
 
@@ -73,7 +73,7 @@
 - 检索技能负责主题检索、筛选、排序和目标文件夹命名；
 - 下载器负责 DOI 再规范化、正文落盘和下载状态；
 - `rank + normalized_doi` 是幂等键；
-- 下载器默认只向 `folder_path` 新增 `article.pdf`，不移动、不覆盖用户已有文件；
+- 下载器默认只向 `folder_path` 新增 `<目录名>.pdf`；已有有效 `article.pdf` 继续作为缓存识别，不移动、不覆盖用户已有文件；
 - 无 DOI 记录保留在检索结果，但标记为 `not_downloadable_without_identifier`；
 - DOI 变化或版本归并由检索技能确认，下载器不猜测论文身份。
 

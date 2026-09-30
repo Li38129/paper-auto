@@ -16,7 +16,7 @@
 - 支持 Springer 与 ACS 的稳定正文 URL 规则；
 - 对 HTTP 200 的 HTML 登录页、验证码页等伪 PDF 做魔数与最小尺寸校验；
 - 使用 `.part` 临时文件和原子替换，失败不会留下损坏 PDF；
-- 默认只保存正文 `article.pdf`，不在论文目录附加清单；
+- 正文 PDF 与论文目录同名（`<目录名>.pdf`），已有有效 `article.pdf` 仍可作为缓存识别；
 - 前台和后台任务默认在 `temp/doi-harvester/jobs/<job_id>` 保存报告；`--report-dir` 可指定报告目录；
 - 内置 `$autopaper-literature` 仓库 Skill，持续维护 Excel 文献清单并把正文写入稳定编号目录；
 - 可读取 Skill 生成的 `papers.json`，把正文直接写入既有编号目录；
@@ -243,7 +243,7 @@ Elsevier、RSC 或 Wiley 可把 `--publisher acs` 分别替换为 `--publisher e
 ```text
 downloads/
 └── 10.1007_s10853-013-7226-8/
-    └── article.pdf
+    └── 10.1007_s10853-013-7226-8.pdf
 ```
 
 默认不会生成 `manifest.json` 或 `batch-report.json`。如需审查下载来源和失败原因，显式指定报告目录：

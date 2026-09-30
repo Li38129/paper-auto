@@ -116,7 +116,8 @@ class Harvester:
                         )
                     ],
                 )
-        pdf_path = article_dir / "article.pdf"
+        pdf_path = article_dir / f"{article_dir.name or doi_slug(doi)}.pdf"
+        legacy_pdf_path = article_dir / "article.pdf"
         article_dir.mkdir(parents=True, exist_ok=True)
 
         if self.supplements_only:
@@ -133,13 +134,21 @@ class Harvester:
             self._display_result(result)
             return result
 
-        if pdf_path.exists() and not overwrite and is_valid_pdf(pdf_path):
+        cached_pdf = next(
+            (
+                candidate
+                for candidate in dict.fromkeys((pdf_path, legacy_pdf_path))
+                if candidate.exists() and is_valid_pdf(candidate)
+            ),
+            None,
+        )
+        if cached_pdf is not None and not overwrite:
             result = DownloadResult(
                 doi=doi,
                 success=True,
                 status="cached",
                 article_dir=article_dir,
-                pdf_path=pdf_path,
+                pdf_path=cached_pdf,
                 source="cache",
                 outcome="success",
                 quality="pdf",

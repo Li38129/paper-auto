@@ -83,8 +83,8 @@ def test_pipeline_downloads_into_requested_paper_folder(tmp_path: Path) -> None:
     result = harvester.download("10.1000/example", article_dir=requested_folder)
 
     assert result.article_dir == requested_folder
-    assert result.pdf_path == requested_folder / "article.pdf"
-    assert set(requested_folder.iterdir()) == {requested_folder / "article.pdf"}
+    assert result.pdf_path == requested_folder / f"{requested_folder.name}.pdf"
+    assert set(requested_folder.iterdir()) == {requested_folder / f"{requested_folder.name}.pdf"}
 
 
 def test_pipeline_prefers_openalex_candidate(tmp_path: Path) -> None:

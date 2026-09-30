@@ -57,7 +57,7 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 4. 每次下载或重试结束后，先把对应 `batch-report.json` 回写 Excel。只有 Excel 写回成功、所有可下载条目成功且 PDF 校验通过时，才能清理一次性任务目录。
 5. Excel 最终写回失败、正文下载失败或仍需人工授权时保留任务目录，并报告可恢复路径和原因。
 
-不得覆盖有效的既有 `article.pdf`，不得改写论文目录中的其他文件，不得代填凭据、破解验证码、绕过付费墙或机构授权。
+新下载的正文 PDF 使用 `<论文目录名>.pdf`；已有有效 `article.pdf` 继续按原路径作为缓存，不移动、不覆盖。补充材料保留出版社附件名，正文和 SI 的实际路径以下载报告为准。不得改写论文目录中的其他文件，不得代填凭据、破解验证码、绕过付费墙或机构授权。
 
 如果当前会话已经注册 AutoPaper MCP，优先使用其 `search`、`download`、`job_status` 和 `update_excel` 工具执行相同步骤；工具不可用时使用仓库脚本，不得因此改变 Excel 先写入、报告后回写和失败任务留档规则。
 
