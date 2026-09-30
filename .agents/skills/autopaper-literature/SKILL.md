@@ -39,6 +39,8 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 检索完成且目标目录已确定后，先读取并严格执行 [Excel 汇总规则](references/workbook.md)。必须先成功创建或更新 `文献检索汇总.xlsx`，再创建论文目录或启动下载。
 
+所有新汇总表使用项目 `reference/文献检索汇总模板.xlsx` 的单页版式。正文下载结果旁设置 `SI是否下载成功` 列；SI 汇总状态写在该列，不创建“补充材料”工作表。
+
 - Excel 中已有序号和目录名不可改变；新文献按本次排序追加到当前最大序号之后。
 - 新记录使用简短 `folder_label`，不要自行加序号；工作簿脚本返回最终 `folder_name` 和绝对 `folder_path`。
 - 每条汇总记录填写 `cas_quartile`、`impact_factor` 和 `journal_metrics_source`；值缺乏可核验依据时写“未核实”，来源字段说明分区版本、IF 年份及对应来源。旧版 18 列工作簿按 Excel 汇总规则扩展字段，保留原有记录与编号。

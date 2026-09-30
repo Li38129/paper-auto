@@ -67,7 +67,7 @@
 
 按本次三项确认的下载模式传参；仅正文不传 SI 参数。集中报告只能写到任务目录，不得写进论文根目录或编号目录。命令结束后先按 [Excel 汇总规则](workbook.md) 回写报告，再判断重试与清理。
 
-需要补充材料时，`--supplements` 同时下载正文和 SI；`--supplements-only` 仅下载 SI，两者互斥。正文及两种 SI 模式均自动创建可恢复任务；`--doi`、`--doi-file`、`--papers-file` 共用任务执行器。所有模式禁止 `--overwrite`。SI 可为 PDF、Office 文档、表格、压缩包、视频或出版社提供的其他原始格式，保存在每篇目录的 `supplements` 子目录。`--results-csv` 指定逐附件结果清单，建议位于论文根目录。固定编号 CSV 可先运行 `scripts/si-csv-batch.py --csv ... --start ... --end ... --output-dir ... --job-dir ... --node ... --node-modules ...`；脚本先将原编号写入 Excel，随后生成 `papers.json` 和目标 CSV。无效或占位 DOI 保留为待核验记录，不进入下载器，也不能阻断其他有效 DOI。SI-only 的报告只更新工作簿“补充材料”页，不改正文下载字段。不同出版社的补充材料链接结构可能不同；链接未能确认、页面访问失败、验证页或解析失败均须保留为未解决状态，只有页面证据明确时才记录“无补充材料”。出版社要求验证时按已确认策略跳过或暂停；暂停后人工完成验证，再使用 `jobs resume <job_id>` 沿用断点。
+需要补充材料时，`--supplements` 同时下载正文和 SI；`--supplements-only` 仅下载 SI，两者互斥。正文及两种 SI 模式均自动创建可恢复任务；`--doi`、`--doi-file`、`--papers-file` 共用任务执行器。所有模式禁止 `--overwrite`。SI 可为 PDF、Office 文档、表格、压缩包、视频或出版社提供的其他原始格式，保存在每篇目录的 `supplements` 子目录。`--results-csv` 指定逐附件结果清单，建议位于论文根目录。固定编号 CSV 可先运行 `scripts/si-csv-batch.py --csv ... --start ... --end ... --output-dir ... --job-dir ... --node ... --node-modules ...`；脚本先将原编号写入 Excel，随后生成 `papers.json` 和目标 CSV。无效或占位 DOI 保留为待核验记录，不进入下载器，也不能阻断其他有效 DOI。SI-only 的报告只更新工作簿“文献清单”的 `SI是否下载成功` 列和更新时间，不改正文下载字段。不同出版社的补充材料链接结构可能不同；链接未能确认、页面访问失败、验证页或解析失败均须保留为未解决状态，只有页面证据明确时才记录“无补充材料”。出版社要求验证时按已确认策略跳过或暂停；暂停后人工完成验证，再使用 `jobs resume <job_id>` 沿用断点。
 
 ## 状态判断与一次重试
 

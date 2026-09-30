@@ -17,6 +17,7 @@ const HEADERS = [
   "检索主题",
   "文献入口",
   "下载成功",
+  "SI是否下载成功",
   "下载状态",
   "失败原因",
   "PDF路径",
@@ -27,15 +28,13 @@ const HEADERS = [
   "影响因子（IF）",
   "分区/IF依据",
 ];
-const LEGACY_HEADERS = HEADERS.slice(0, 18);
-const SI_HEADERS = ["序号", "DOI", "SI状态", "附件名", "来源链接", "本地路径", "格式", "字节", "SHA256", "附件结果", "失败原因"];
+const PREVIOUS_HEADERS = HEADERS.filter((header) => header !== "SI是否下载成功");
+const LEGACY_HEADERS = PREVIOUS_HEADERS.slice(0, 18);
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATE = path.resolve(
   SCRIPT_DIR,
-  "..",
-  "assets",
-  "literature-index-template.xlsx",
+  "..", "..", "..", "..", "reference", "文献检索汇总模板.xlsx",
 );
 
 function parseArgs(argv) {
@@ -111,8 +110,10 @@ function isBlankRow(row) {
   return row.every((value) => value === null || value === undefined || String(value).trim() === "");
 }
 
-function rowToObject(row) {
-  return Object.fromEntries(HEADERS.map((header, index) => [header, row[index] ?? ""]));
+function rowToObject(row, headers) {
+  const record = Object.fromEntries(HEADERS.map((header) => [header, ""]));
+  headers.forEach((header, index) => { record[header] = row[index] ?? ""; });
+  return record;
 }
 
 function objectToRow(record) {
@@ -263,31 +264,35 @@ function resolveTable(workbook) {
   const actualHeaders = table.getHeaderRowRange().values[0].map((value) => cleanText(value));
   const current = actualHeaders.length === HEADERS.length
     && actualHeaders.every((value, index) => value === HEADERS[index]);
+  const previous = actualHeaders.length === PREVIOUS_HEADERS.length
+    && actualHeaders.every((value, index) => value === PREVIOUS_HEADERS[index]);
   const legacy = actualHeaders.length === LEGACY_HEADERS.length
     && actualHeaders.every((value, index) => value === LEGACY_HEADERS[index]);
-  if (!current && !legacy) {
+  if (!current && !previous && !legacy) {
     throw new Error("LiteratureTable 字段与 AutoPaper 模板不兼容，原文件未修改。");
   }
-  return { sheet, table, legacy };
+  return { sheet, table, headers: actualHeaders, legacy, migration: !current };
 }
 
-function readTableRows(sheet) {
-  const values = sheet.getRange(`A5:U5000`).values ?? [];
-  return values.filter((row) => !isBlankRow(row)).map(rowToObject);
+function readTableRows(sheet, headers) {
+  const values = sheet.getRangeByIndexes(4, 0, 4996, headers.length).values ?? [];
+  return values.filter((row) => !isBlankRow(row)).map((row) => rowToObject(row, headers));
 }
 
-function expandLegacyTable(sheet, table, existingCount) {
-  const adjacent = sheet.getRange(`S4:U${Math.max(4, existingCount + 4)}`).values ?? [];
-  if (adjacent.some((row) => !isBlankRow(row))) {
-    throw new Error("旧版工作簿的 S:U 列已有内容，无法安全追加指标字段，原文件未修改。");
+function readLegacySiStatuses(workbook) {
+  let sheet;
+  try { sheet = workbook.worksheets.getItem("补充材料"); }
+  catch { return new Map(); }
+  const statuses = new Map();
+  for (const row of (sheet.getUsedRange()?.values ?? []).slice(1)) {
+    const doi = normalizeDoi(row[1]);
+    if (!doi) continue;
+    const status = cleanText(row[2]);
+    const value = ["downloaded", "cached"].includes(status) ? "是"
+      : status === "pending" ? "未尝试" : "否";
+    statuses.set(doi, value);
   }
-  const previousStyle = table.style;
-  table.delete();
-  sheet.getRange("S4:U4").values = [HEADERS.slice(18)];
-  sheet.getRange("S4:U4").format.columnWidth = 24;
-  const expanded = sheet.tables.add(`A4:U${Math.max(4, existingCount + 4)}`, true, "LiteratureTable");
-  if (previousStyle) expanded.style = previousStyle;
-  return expanded;
+  return statuses;
 }
 
 function updateRowMap(rows) {
@@ -378,6 +383,7 @@ function upsertRecords(rows, payload, workbookPath, folderRoot) {
       row["下载状态"] = "missing_doi";
       row["失败原因"] = "缺少可靠 DOI，未进入下载器";
     }
+    if (!row["SI是否下载成功"]) row["SI是否下载成功"] = row.DOI ? "未尝试" : "不适用";
 
     const folderName = cleanText(row["目录名"]);
     resolved.push({
@@ -397,22 +403,19 @@ function applyReport(rows, results) {
   const indexes = updateRowMap(rows);
   const timestamp = nowText();
   for (const result of results) {
-    if (result.download_mode === "supplements_only") {
-      const doi = normalizeDoi(result.doi);
-      const row = rows[indexes.byDoi.get(doi)];
-      if (row && !cleanText(row["PDF路径"]) && !cleanText(row["下载来源"]) && ["downloaded", "cached"].includes(cleanText(row["下载状态"]))) {
-        row["下载成功"] = "未尝试";
-        row["下载状态"] = "pending";
-        row["失败原因"] = "";
-      }
-      continue;
-    }
     const doi = normalizeDoi(result.doi);
     const rowIndex = indexes.byDoi.get(doi);
     if (rowIndex === undefined) {
       throw new Error(`下载报告中的 DOI 不在工作簿中：${doi || "<空>"}`);
     }
     const row = rows[rowIndex];
+    if (result.download_mode !== "article") {
+      row["SI是否下载成功"] = supplementSuccess(result);
+      row["最后更新时间"] = timestamp;
+    }
+    if (result.download_mode === "supplements_only") {
+      continue;
+    }
     const status = cleanText(result.status) || "failed";
     const success = result.success === true && ["downloaded", "cached"].includes(status);
     row["下载成功"] = success ? "是" : "否";
@@ -424,75 +427,12 @@ function applyReport(rows, results) {
   }
 }
 
-function updateSupplementSheet(workbook, results) {
-  const relevant = results.filter((item) => item.download_mode !== "article");
-  if (!relevant.length) return;
-  let sheet;
-  try { sheet = workbook.worksheets.getItem("补充材料"); }
-  catch { sheet = workbook.worksheets.add("补充材料"); }
-  const usedRange = sheet.getUsedRange();
-  const oldValues = usedRange?.values?.slice(1) ?? [];
-  const dois = new Set(relevant.map((item) => normalizeDoi(item.doi)));
-  const retained = oldValues.filter((row) => (cleanText(row[1]) || cleanText(row[0])) && !dois.has(normalizeDoi(row[1])));
-  const rows = [...retained];
-  for (const result of relevant) {
-    const siStatus = result.status === "auth_skipped" ? "auth_skipped" : result.supplement_status;
-    const files = Array.isArray(result.supplements) ? result.supplements : [];
-    const attempts = Array.isArray(result.supplement_attempts) ? result.supplement_attempts : [];
-    if (!files.length && !attempts.length) {
-      rows.push([result.rank || "", normalizeDoi(result.doi), siStatus || "unconfirmed", "", "", "", "", "", "", "", result.failure_reason || ""]);
-    }
-    for (const file of files) {
-      const attempt = attempts.find((item) => item.success && (item.url === file.url || item.final_url === file.url));
-      rows.push([result.rank || "", normalizeDoi(result.doi), siStatus || "", file.name || "", file.url || "", file.path || "", file.content_type || "", file.bytes_written || "", file.sha256 || "", attempt?.reason || "downloaded", ""]);
-    }
-    const successfulUrls = new Set(files.map((file) => file.url));
-    for (const attempt of attempts.filter((item) => item.success)) {
-      successfulUrls.add(attempt.url);
-      successfulUrls.add(attempt.final_url);
-    }
-    const finalAttempts = new Map(attempts.map((attempt) => [attempt.url, attempt]));
-    for (const attempt of [...finalAttempts.values()].filter((item) => !item.success && !successfulUrls.has(item.url))) {
-      rows.push([result.rank || "", normalizeDoi(result.doi), siStatus || "", "", attempt.url || "", "", "", "", "", "failed", attempt.reason || "failed"]);
-    }
-  }
-  rows.sort((left, right) => Number(left[0]) - Number(right[0]) || String(left[3]).localeCompare(String(right[3])));
-  sheet.getRange("A1:K1").values = [SI_HEADERS];
-  formatSupplementSheet(sheet);
-  const total = Math.max(oldValues.filter((row) => cleanText(row[1])).length, rows.length);
-  if (total) sheet.getRangeByIndexes(1, 0, total, SI_HEADERS.length).values = [...rows, ...Array.from({length: total - rows.length}, () => Array(SI_HEADERS.length).fill(""))];
-}
-
-function formatSupplementSheet(sheet) {
-  const widths = [9, 32, 18, 42, 72, 72, 26, 15, 67, 18, 38];
-  const heading = sheet.getRange("A1:K1");
-  heading.format.fill = "#24486A";
-  heading.format.font.color = "#FFFFFF";
-  heading.format.font.bold = true;
-  heading.format.rowHeight = 26;
-  widths.forEach((width, index) => {
-    sheet.getRangeByIndexes(0, index, 1, 1).format.columnWidth = width;
-  });
-  sheet.freezePanes.freezeRows(1);
-}
-
-function seedSupplementSheet(workbook, resolved) {
-  let sheet;
-  try { sheet = workbook.worksheets.getItem("补充材料"); }
-  catch { sheet = workbook.worksheets.add("补充材料"); }
-  const usedRange = sheet.getUsedRange();
-  const old = usedRange?.values?.slice(1) ?? [];
-  const knownDois = new Set(old.map((row) => normalizeDoi(row[1])).filter(Boolean));
-  const knownSequences = new Set(old.map((row) => Number(row[0])).filter(Number.isInteger));
-  const additions = resolved.filter((record) => record.doi
-    ? !knownDois.has(normalizeDoi(record.doi))
-    : !knownSequences.has(Number(record.sequence)));
-  sheet.getRange("A1:K1").values = [SI_HEADERS];
-  formatSupplementSheet(sheet);
-  if (additions.length) {
-    const existingCount = old.filter((row) => cleanText(row[1]) || cleanText(row[0])).length;
-    sheet.getRangeByIndexes(existingCount + 1, 0, additions.length, SI_HEADERS.length).values = additions.map((record) => [record.sequence, record.doi, "pending", "", "", "", "", "", "", "", ""]);
-  }
+function supplementSuccess(result) {
+  const status = cleanText(result.supplement_status);
+  if (result.status === "auth_skipped") return "否";
+  if (["downloaded", "cached"].includes(status)) return "是";
+  if (["not_requested", "pending"].includes(status)) return "未尝试";
+  return "否";
 }
 
 function writeRowsToTable(sheet, table, rows, existingCount) {
@@ -554,14 +494,15 @@ async function main() {
   const workbookPath = requiredArg(args, "workbook");
   const recordsPath = args.get("records") ? path.resolve(args.get("records")) : null;
   const reportPath = args.get("report") ? path.resolve(args.get("report")) : null;
+  const migrateOnly = args.get("migrate-only") === "true";
   const resolvedPath = args.get("resolved") ? path.resolve(args.get("resolved")) : null;
   const templatePath = args.get("template") ? path.resolve(args.get("template")) : DEFAULT_TEMPLATE;
   const folderRoot = args.get("folder-root")
     ? path.resolve(args.get("folder-root"))
     : path.dirname(workbookPath);
 
-  if (!recordsPath && !reportPath) {
-    throw new Error("必须提供 --records 或 --report。");
+  if (!recordsPath && !reportPath && !migrateOnly) {
+    throw new Error("必须提供 --records、--report 或 --migrate-only true。");
   }
   if (recordsPath && !resolvedPath) {
     throw new Error("使用 --records 时必须同时提供 --resolved。");
@@ -573,10 +514,20 @@ async function main() {
   }
 
   const artifact = await loadArtifactTool(nodeModulesPath);
-  const workbook = await loadWorkbook(artifact, workbookPath, templatePath);
-  const { sheet, table, legacy } = resolveTable(workbook);
-  const rows = readTableRows(sheet);
-  const existingCount = rows.length;
+  let workbook = await loadWorkbook(artifact, workbookPath, templatePath);
+  const source = resolveTable(workbook);
+  const rows = readTableRows(source.sheet, source.headers);
+  let existingCount = rows.length;
+  const siStatuses = source.migration ? readLegacySiStatuses(workbook) : new Map();
+  if (source.migration) {
+    for (const row of rows) {
+      row["SI是否下载成功"] = siStatuses.get(normalizeDoi(row.DOI)) || (row.DOI ? "未尝试" : "不适用");
+    }
+    workbook = await artifact.SpreadsheetFile.importXlsx(await artifact.FileBlob.load(templatePath));
+    existingCount = 0;
+  }
+  const { sheet, table } = resolveTable(workbook);
+  const legacy = source.legacy;
   if (legacy) {
     for (const row of rows) {
       row["中科院分区"] = "未核实";
@@ -588,18 +539,13 @@ async function main() {
   if (recordsPath) {
     const recordsPayload = validateRecordsPayload(await readJson(recordsPath));
     resolved = upsertRecords(rows, recordsPayload, workbookPath, folderRoot);
-    if (recordsPayload.records.some((record) => record.sequence !== null)) {
-      seedSupplementSheet(workbook, resolved);
-    }
   }
   if (reportPath) {
     const results = validateReportPayload(await readJson(reportPath));
     applyReport(rows, results);
-    updateSupplementSheet(workbook, results);
   }
 
-  const activeTable = legacy ? expandLegacyTable(sheet, table, existingCount) : table;
-  writeRowsToTable(sheet, activeTable, rows, existingCount);
+  writeRowsToTable(sheet, table, rows, existingCount);
   workbook.recalculate();
   await saveAtomically(artifact, workbook, workbookPath);
 

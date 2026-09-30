@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 
-def test_excel_si_report_uses_final_attachment_outcome():
+def test_excel_si_report_updates_single_status_column():
     node = shutil.which("node")
     if not node:
         pytest.skip("未安装 Node.js")
@@ -18,36 +18,26 @@ const fs = require('fs');
 const vm = require('vm');
 const assert = require('assert');
 const source = fs.readFileSync(process.argv[1], 'utf8');
-const start = source.indexOf('function updateSupplementSheet(');
-const end = source.indexOf('function seedSupplementSheet(', start);
-const context = {SI_HEADERS: Array(11).fill(''),
-  normalizeDoi: x => x.toLowerCase(), cleanText: x => String(x || '')};
+const start = source.indexOf('function applyReport(');
+const end = source.indexOf('function writeRowsToTable(', start);
+const context = {
+  validateExistingRows: () => {},
+  updateRowMap: () => ({byDoi: new Map([['10.1000/test', 0]])}),
+  normalizeDoi: x => String(x || '').toLowerCase(),
+  cleanText: x => String(x || '').trim(),
+  nowText: () => '2026-09-30',
+};
 vm.createContext(context);
 vm.runInContext(source.slice(start, end), context);
-let rows;
-const sheet = {
-  getUsedRange: () => ({values: [[], [200, '10.1000/retained']]}),
-  getRange: () => ({format: {font: {}}}),
-  getRangeByIndexes: (r, c) => r === 1 && c === 0 ? {set values(v) {rows = v;}} : {format: {}},
-  freezePanes: {freezeRows: () => {}}
-};
-const workbook = {worksheets: {getItem: name => {
-  assert.strictEqual(name, '补充材料'); return sheet;}}};
-context.updateSupplementSheet(workbook, [{download_mode: 'supplements_only',
-  rank: 301, doi: '10.1000/test', supplement_status: 'partial',
-  supplements: [{url: 'https://cdn/good', name: 'si.docx'}], supplement_attempts: [
-  {url: 'https://cdn/good', success: false, reason: 'http_500'},
-  {url: 'https://cdn/good', success: true, reason: 'downloaded'},
-  {url: 'https://cdn/bad', success: false, reason: 'http_500'},
-  {url: 'https://cdn/bad', success: false, reason: 'Failed to fetch'}
-]}, {download_mode: 'supplements_only', rank: 302, doi: '10.1000/skipped',
-  status: 'auth_skipped', supplement_status: 'authentication_required',
-  failure_reason: 'authentication_required'}]);
-assert.strictEqual(rows.length, 4);
-assert.strictEqual(rows.find(r => r[0] === 302)[2], 'auth_skipped');
-assert.strictEqual(rows.filter(r => r[9] === 'failed').length, 1);
-assert.strictEqual(rows.find(r => r[3] === 'si.docx')[9], 'downloaded');
-assert.strictEqual(rows.find(r => r[9] === 'failed')[10], 'Failed to fetch');
-assert.strictEqual(rows[0][1], '10.1000/retained');
+const rows = [{DOI: '10.1000/test', '下载成功': '是', '下载状态': 'downloaded',
+  'PDF路径': 'article.pdf', 'SI是否下载成功': '未尝试'}];
+context.applyReport(rows, [{download_mode: 'supplements_only', doi: '10.1000/test',
+  supplement_status: 'downloaded'}]);
+assert.strictEqual(rows[0]['SI是否下载成功'], '是');
+assert.strictEqual(rows[0]['下载成功'], '是');
+assert.strictEqual(rows[0]['PDF路径'], 'article.pdf');
+context.applyReport(rows, [{download_mode: 'supplements_only', doi: '10.1000/test',
+  supplement_status: 'partial'}]);
+assert.strictEqual(rows[0]['SI是否下载成功'], '否');
 """
     subprocess.run([node, "-e", code, str(script)], check=True, capture_output=True, text=True)
