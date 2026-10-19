@@ -118,6 +118,11 @@ class CrossrefMetadataClient:
             else ""
         )
         raw_issns = message.get("ISSN") or []
+        short_titles = message.get("short-container-title") or []
+        journal_abbreviation = (
+            str(short_titles[0]).strip()
+            if isinstance(short_titles, list) and short_titles else ""
+        )
         issns = tuple(
             dict.fromkeys(
                 str(value).strip().upper()
@@ -150,6 +155,7 @@ class CrossrefMetadataClient:
             year=_published_year(message),
             landing_url=landing_url,
             candidates=_deduplicate(candidates),
+            journal_abbreviation=journal_abbreviation,
         )
 
 

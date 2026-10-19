@@ -5,12 +5,15 @@ import pytest
 
 from doi_harvester import cli, job_runner
 from doi_harvester.browser import AuthorizationResult
-from doi_harvester.models import DownloadResult
+from doi_harvester.models import ArticleMetadata, DownloadResult
 
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(monkeypatch, tmp_path):
     monkeypatch.setenv("DOI_HARVESTER_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        cli.CrossrefMetadataClient, "fetch", lambda self, doi: ArticleMetadata(doi=doi)
+    )
 
 
 def test_supplement_modes_are_mutually_exclusive() -> None:
@@ -481,7 +484,11 @@ def test_all_inputs_and_modes_create_checkpoint_task(
     items = store.get_job(job["id"])["items"]
     assert items[0]["rank"] == (420 if entry == "papers-file" else 1)
     assert Path(items[0]["folder_path"]) == (
-        folder if entry == "papers-file" else tmp_path / "papers" / "10.1000_example"
+        folder if entry == "papers-file"
+        else tmp_path / "papers" / (
+            "1_IF未核实_期刊简称未核实_分区未核实_年份未核实_"
+            "题名未核实-10.1000-example"
+        )
     )
     assert bool(captured) is (not detach)
 

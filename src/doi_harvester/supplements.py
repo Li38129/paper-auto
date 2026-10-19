@@ -602,12 +602,14 @@ class HttpSupplementDownloader:
         artifacts: list[SupplementArtifact] = []
         attempts: list[Attempt] = []
         final_statuses: list[str] = []
-        for url in urls:
-            status, files, routes = self._download_urls(session, [url], article_dir)
+        for index, url in enumerate(urls, start=1):
+            status, files, routes = self._download_urls(
+                session, [url], article_dir, start_index=index
+            )
             attempts.extend(routes)
             if not files:
                 browser_status, files, browser_routes = self._download_browser_urls(
-                    page, [url], article_dir
+                    page, [url], article_dir, start_index=index
                 )
                 attempts.extend(browser_routes)
                 if files or browser_status not in {"not_downloadable", "partial"}:
@@ -638,13 +640,13 @@ class HttpSupplementDownloader:
         )
 
     def _download_browser_urls(
-        self, page: object, urls: list[str], article_dir: Path
+        self, page: object, urls: list[str], article_dir: Path, *, start_index: int = 1
     ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
         """让已授权的浏览器发起下载，并把浏览器缓存文件复制到目标目录。"""
         artifacts: list[SupplementArtifact] = []
         attempts: list[Attempt] = []
         supplement_dir = article_dir / "supplements"
-        for index, url in enumerate(urls, start=1):
+        for index, url in enumerate(urls, start=start_index):
             temporary: Path | None = None
             response = {}
             try:
@@ -670,6 +672,7 @@ class HttpSupplementDownloader:
                     disposition=str(response.get("disposition") or ""),
                     content_type=content_type,
                     index=index,
+                    article_name=article_dir.name,
                 )
                 supplement_dir.mkdir(parents=True, exist_ok=True)
                 temporary = supplement_dir / f".{name}.{index}.part"
@@ -783,11 +786,12 @@ class HttpSupplementDownloader:
         article_dir: Path,
         *,
         require_https: bool = False,
+        start_index: int = 1,
     ) -> tuple[str, list[SupplementArtifact], list[Attempt]]:
         artifacts: list[SupplementArtifact] = []
         attempts: list[Attempt] = []
         supplement_dir = article_dir / "supplements"
-        for index, url in enumerate(urls, start=1):
+        for index, url in enumerate(urls, start=start_index):
             response = None
             try:
                 with session.get(url, timeout=self.timeout_seconds, stream=True) as response:
@@ -813,6 +817,7 @@ class HttpSupplementDownloader:
                         disposition=response.headers.get("content-disposition", ""),
                         content_type=content_type,
                         index=index,
+                        article_name=article_dir.name,
                     )
                     supplement_dir.mkdir(parents=True, exist_ok=True)
                     destination = supplement_dir / name
@@ -914,6 +919,7 @@ def _supplement_filename(
     disposition: str,
     content_type: str,
     index: int,
+    article_name: str = "",
 ) -> str:
     """从响应头、查询参数和 URL 生成 Windows 安全文件名。"""
     encoded_name = re.search(r"filename\*=UTF-8''([^;]+)", disposition, re.I)
@@ -937,4 +943,22 @@ def _supplement_filename(
         }
         name = f"{name or f'supplement-{index:02d}'}{extensions.get(content_type, '.bin')}"
     safe = INVALID_FILENAME.sub("_", name).strip(" .")
+    # 新版目录包含稳定编号和指标；旧目录继续兼容原有附件缓存。
+    parts = article_name.split("_", 5)
+    zones = {"一区", "顶刊", "二区", "三区", "四区", "分区未核实"}
+    # 兼容上一版不含期刊简称的目录。
+    if len(parts) >= 5 and parts[2] in zones:
+        parts = article_name.split("_", 4)
+        year_index = 3
+    else:
+        year_index = 4
+    if (
+        len(parts) == year_index + 2
+        and parts[0].isdigit()
+        and parts[1].startswith("IF")
+        and parts[year_index - 1] in zones
+        and (re.fullmatch(r"\d{4}", parts[year_index]) or parts[year_index] == "年份未核实")
+    ):
+        suffix = Path(safe).suffix or ".bin"
+        return f"{'_'.join(parts[:year_index + 1])}_si{index}_{parts[year_index + 1]}{suffix}"
     return safe or f"supplement-{index:02d}.bin"

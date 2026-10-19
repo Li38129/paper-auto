@@ -434,7 +434,10 @@ class JobStore:
                 )
             connection.commit()
 
-    def prepare_resume(self, job_id: str, *, retry_failed: bool = False) -> int:
+    def prepare_resume(
+        self, job_id: str, *, retry_failed: bool = False,
+        retry_dois: list[str] | None = None,
+    ) -> int:
         with self.connect() as connection:
             job = connection.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if job is None:
@@ -443,6 +446,26 @@ class JobStore:
                 raise ValueError(f"任务当前为 {job['status']}，不能重复启动。")
             timestamp = _now()
             failed_count = 0
+            selected = list(dict.fromkeys(retry_dois or []))
+            if retry_failed and selected:
+                raise ValueError("--retry-failed与--retry-doi不能同时使用")
+            if selected:
+                placeholders = ",".join("?" for _ in selected)
+                matches = connection.execute(
+                    "SELECT doi, status FROM job_items WHERE job_id = ? "
+                    f"AND doi IN ({placeholders})",
+                    (job_id, *selected),
+                ).fetchall()
+                if len(matches) != len(selected) or any(
+                    row["status"] != "failed" for row in matches
+                ):
+                    raise ValueError("指定DOI必须属于原任务且全部是普通失败项")
+                failed_count = int(connection.execute(
+                    "UPDATE job_items SET status = 'pending', retry_priority = 1, "
+                    "updated_at = ? WHERE job_id = ? "
+                    f"AND doi IN ({placeholders})",
+                    (timestamp, job_id, *selected),
+                ).rowcount)
             if retry_failed:
                 failed_count = int(
                     connection.execute(

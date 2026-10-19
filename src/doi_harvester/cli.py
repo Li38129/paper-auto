@@ -21,6 +21,8 @@ from .doctor import run_doctor
 from .doi import InvalidDoiError, doi_slug, normalize_doi
 from .job_runner import run_broker, run_job
 from .job_store import JobStore
+from .metadata import CrossrefMetadataClient, MetadataError
+from .naming import literature_name
 from .papers import PaperJob, PapersFileError, load_paper_jobs, validate_supplement_urls
 from .pipeline import Harvester
 
@@ -165,6 +167,10 @@ def build_parser() -> argparse.ArgumentParser:
                 "--retry-failed",
                 action="store_true",
                 help="同时重试普通失败条目；用于审查后的定向恢复。",
+            )
+            item.add_argument(
+                "--retry-doi", action="append", default=[],
+                help="仅重试指定的普通失败DOI；可重复传入，不重新入队验证跳过项。",
             )
 
     doctor = subparsers.add_parser("doctor", help="检查任务库、浏览器和出版社规则。")
@@ -358,19 +364,32 @@ def main(argv: list[str] | None = None) -> int:
     store = JobStore(runtime / "jobs" / "jobs.sqlite3")
     records = []
     for rank, (doi, paper_job) in enumerate(tasks, start=1):
+        folder_path = (
+            paper_job.folder_path if paper_job else args.output_dir.resolve() / doi_slug(doi)
+        )
+        title = paper_job.title if paper_job else ""
+        year = paper_job.year if paper_job else None
+        journal_abbreviation = ""
+        if paper_job is None and not folder_path.exists():
+            try:
+                metadata = CrossrefMetadataClient().fetch(doi)
+                title, year = metadata.title, metadata.year
+                journal_abbreviation = metadata.journal_abbreviation
+            except MetadataError:
+                pass
+            folder_path = args.output_dir.resolve() / literature_name(
+                rank, title or f"题名未核实-{doi}", year,
+                journal_abbreviation=journal_abbreviation,
+            )
         records.append(
             {
                 "rank": paper_job.rank if paper_job else rank,
                 "doi": doi,
-                "title": paper_job.title if paper_job else doi,
-                "folder_path": str(
-                    paper_job.folder_path
-                    if paper_job
-                    else (args.output_dir.resolve() / doi_slug(doi))
-                ),
+                "title": title or doi,
+                "folder_path": str(folder_path),
                 "journal": paper_job.journal if paper_job else "",
                 "issn": paper_job.issn if paper_job else "",
-                "year": paper_job.year if paper_job else None,
+                "year": year,
             }
         )
     if bool(args.node_path) != bool(args.node_modules):
@@ -465,7 +484,10 @@ def _run_jobs(args: argparse.Namespace) -> int:
         return 0
     if args.jobs_command == "resume":
         try:
-            count = store.prepare_resume(args.job_id, retry_failed=args.retry_failed)
+            count = store.prepare_resume(
+                args.job_id, retry_failed=args.retry_failed,
+                retry_dois=[normalize_doi(value) for value in args.retry_doi],
+            )
         except ValueError as exc:
             print(f"[失败] {exc}")
             return 2

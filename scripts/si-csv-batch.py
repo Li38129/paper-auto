@@ -15,7 +15,7 @@ from pathlib import Path
 import requests
 
 
-def _metadata(doi: str) -> tuple[str, int | None, str]:
+def _metadata(doi: str) -> tuple[str, int | None, str, str]:
     for attempt in range(3):
         try:
             response = requests.get(
@@ -30,11 +30,12 @@ def _metadata(doi: str) -> tuple[str, int | None, str]:
             dates = (record.get("published") or {}).get("date-parts") or []
             year = int(dates[0][0]) if dates and dates[0] else None
             journal = (record.get("container-title") or [""])[0]
-            return title, year, journal
+            abbreviation = (record.get("short-container-title") or [""])[0]
+            return title, year, journal, abbreviation
         except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
             if attempt < 2:
                 time.sleep(attempt + 1)
-    return "", None, ""
+    return "", None, "", ""
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -58,7 +59,9 @@ def prepare(args: argparse.Namespace) -> None:
     dois = [row["DOI"].strip().lower() for row in selected]
     if sequences != list(range(args.start, args.end + 1)) or len(set(dois)) != len(dois):
         raise ValueError("选定序号不连续，或 DOI 存在重复。")
-    valid_indexes = [index for index, doi in enumerate(dois) if doi.startswith("10.") and "/" in doi]
+    valid_indexes = [
+        index for index, doi in enumerate(dois) if doi.startswith("10.") and "/" in doi
+    ]
     metadata_by_index = {}
     with ThreadPoolExecutor(max_workers=12) as pool:
         futures = {}
@@ -69,6 +72,7 @@ def prepare(args: argparse.Namespace) -> None:
                     str(cached.get("title") or ""),
                     cached.get("year"),
                     str(cached.get("journal") or ""),
+                    str(cached.get("journal_abbreviation") or ""),
                 )
             else:
                 futures[index] = pool.submit(_metadata, dois[index])
@@ -78,7 +82,7 @@ def prepare(args: argparse.Namespace) -> None:
     targets = []
     papers = []
     for index, (row, doi) in enumerate(zip(selected, dois, strict=True)):
-        title, year, journal = metadata_by_index.get(index, ("", None, ""))
+        title, year, journal, abbreviation = metadata_by_index.get(index, ("", None, "", ""))
         prior = previous.get(doi, {})
         title = title or str(prior.get("title") or "")
         year = year or prior.get("year")
@@ -87,7 +91,7 @@ def prepare(args: argparse.Namespace) -> None:
         valid_doi = doi.startswith("10.") and "/" in doi
         if not valid_doi and not title:
             title = f"DOI 待核验（原序号 {sequence}）"
-        folder_name = f"{sequence:04d}_{doi.replace('/', '_')}" if valid_doi else ""
+        folder_name = ""
         folder_path = output / folder_name
         page = (
             (f"https://advanced.onlinelibrary.wiley.com/doi/{doi}"
@@ -98,12 +102,21 @@ def prepare(args: argparse.Namespace) -> None:
             {
                 "rank": sequence,
                 "sequence": sequence,
-                "folder_name": folder_name,
                 "folder_label": doi.replace("/", "_") if valid_doi else f"DOI待核验_{sequence}",
                 "title": title,
                 "doi": doi if valid_doi else "",
                 "year": year,
                 "journal": journal,
+                "journal_abbreviation": (
+                    row.get("期刊简称") or abbreviation or prior.get("journal_abbreviation") or ""
+                ),
+                "cas_quartile": row.get("中科院分区") or prior.get("cas_quartile") or "未核实",
+                "impact_factor": (
+                    row.get("影响因子（IF）") or prior.get("impact_factor") or "未核实"
+                ),
+                "journal_metrics_source": (
+                    row.get("分区/IF依据") or prior.get("journal_metrics_source") or ""
+                ),
                 "paper_type": "",
                 "system": "",
                 "metric": "",
@@ -159,10 +172,14 @@ def prepare(args: argparse.Namespace) -> None:
     resolved = json.loads(resolved_path.read_text(encoding="utf-8"))["records"]
     actual_papers = [item for item in resolved if item.get("doi")]
     for actual, planned in zip(actual_papers, papers, strict=True):
-        if actual["sequence"] != planned["rank"] or Path(actual["folder_path"]) != Path(
-            planned["folder_path"]
-        ):
-            raise ValueError("Excel 返回的编号或目录与 CSV 不一致。")
+        if actual["sequence"] != planned["rank"]:
+            raise ValueError("Excel 返回的编号与 CSV 不一致。")
+        planned["folder_path"] = actual["folder_path"]
+    resolved_by_sequence = {item["sequence"]: item for item in actual_papers}
+    for target in targets:
+        if target["计划状态"] == "待下载":
+            folder = Path(resolved_by_sequence[target["序号"]]["folder_path"])
+            target["SI目标目录"] = str(folder / "supplements")
     papers_path.write_text(
         json.dumps({"schema_version": 1, "papers": papers}, ensure_ascii=False, indent=2),
         encoding="utf-8",

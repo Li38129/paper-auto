@@ -9,12 +9,14 @@ from typing import Any
 
 from .access_policy import AccessPolicyStore
 from .doi import doi_slug, normalize_doi
+from .filesystem import native_file_path
 from .metadata import (
     CrossrefMetadataClient,
     MetadataError,
     OpenAlexMetadataClient,
 )
 from .models import ArticleMetadata, Attempt, DownloadCandidate, DownloadResult, NextAction
+from .naming import literature_name
 from .publisher_profiles import infer_publisher_profile
 from .transport import HttpPdfTransport, is_valid_pdf
 
@@ -69,9 +71,20 @@ class Harvester:
         article_dir: Path | None = None,
     ) -> DownloadResult:
         doi = normalize_doi(raw_doi)
+        prepared_metadata = None
+        if article_dir is None and not (self.output_dir / doi_slug(doi)).exists():
+            prepared_metadata = self._metadata(doi)
+            article_dir = self.output_dir / literature_name(
+                self.display_rank or 1,
+                prepared_metadata.title or f"题名未核实-{doi}",
+                prepared_metadata.year,
+                journal_abbreviation=prepared_metadata.journal_abbreviation,
+            )
         article_dir = (
             Path(article_dir) if article_dir is not None else self.output_dir / doi_slug(doi)
         )
+        # 为正文、SI文件名和临时扩展名预留路径长度，不改写短路径接口。
+        article_dir = native_file_path(article_dir, reserve=len(article_dir.name) + 64)
         if self.browser_display == "foreground":
             from .visible_browser import VisibleBrowser
 
@@ -164,7 +177,7 @@ class Harvester:
                 mode="正文与补充材料" if self.download_supplements else "仅正文",
                 stage="获取正文",
             )
-        metadata = self._metadata(doi)
+        metadata = prepared_metadata or self._metadata(doi)
         open_candidates = self.openalex.fetch_candidates(doi)
         result = DownloadResult(
             doi=doi,

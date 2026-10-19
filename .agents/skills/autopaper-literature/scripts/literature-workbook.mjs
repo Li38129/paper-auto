@@ -88,14 +88,30 @@ function cleanText(value) {
 
 function safeFolderLabel(value) {
   const cleaned = cleanText(value)
-    .replace(/[<>:\"/\\|?*]/g, "-")
+    .replace(/[<>:\"/\\|?*\x00-\x1f]/g, "-")
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")
     .trim();
   if (!cleaned) {
     throw new Error("folder_label 清理后为空。请提供可辨认的论文目录标签。");
   }
-  return Array.from(cleaned).slice(0, 96).join("");
+  return Array.from(cleaned).slice(0, 160).join("").replace(/[. ]+$/g, "");
+}
+
+function literatureFolderName(sequence, record) {
+  // 指标年份留在工作簿依据列，目录只使用已提供的指标值。
+  const metric = cleanText(record.impactFactor);
+  const number = /^(?:IF\s*)?(\d+(?:\.\d+)?)$/i.exec(metric)
+    || /(?:JCR|IF|影响因子)\s*[:：=]?\s*(\d+(?:\.\d+)?)(?![\d.])/i.exec(metric);
+  const impact = metric.includes("未核实") ? "未核实" : number?.[1] || "未核实";
+  const quartile = cleanText(record.casQuartile);
+  const match = /([一二三四1-4])\s*区/.exec(quartile);
+  const zone = quartile.includes("未核实") ? "分区未核实"
+    : /顶刊|\btop\b/i.test(quartile) ? "顶刊"
+    : match ? `${({1: "一", 2: "二", 3: "三", 4: "四"})[match[1]] || match[1]}区`
+    : "分区未核实";
+  const journal = cleanText(record.journalAbbreviation).replace(/[_\s]+/g, " ") || "期刊简称未核实";
+  return safeFolderLabel(`${sequence}_IF${impact}_${journal}_${zone}_${record.year || "年份未核实"}_${record.title || "题名未核实"}`);
 }
 
 function mergeTopic(existing, current) {
@@ -197,11 +213,12 @@ function validateRecordsPayload(payload) {
       rank,
       sequence: raw.sequence === undefined ? null : Number(raw.sequence),
       folderName,
-      folderLabel: safeFolderLabel(raw.folder_label),
+      folderLabel: raw.folder_label ? safeFolderLabel(raw.folder_label) : "",
       title,
       doi,
       year: Number.isInteger(raw.year) ? raw.year : "",
       journal: cleanText(raw.journal),
+      journalAbbreviation: cleanText(raw.journal_abbreviation),
       casQuartile: cleanText(raw.cas_quartile),
       impactFactor: cleanText(raw.impact_factor),
       journalMetricsSource: cleanText(raw.journal_metrics_source),
@@ -347,7 +364,7 @@ function upsertRecords(rows, payload, workbookPath, folderRoot) {
       maxSequence = Math.max(maxSequence, sequence);
       row = Object.fromEntries(HEADERS.map((header) => [header, ""]));
       row["序号"] = sequence;
-      row["目录名"] = record.folderName || `${sequence}${record.folderLabel}`;
+      row["目录名"] = record.folderName || literatureFolderName(sequence, record);
       row["首次收录时间"] = timestamp;
       rows.push(row);
       rowIndex = rows.length - 1;

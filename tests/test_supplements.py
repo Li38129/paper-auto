@@ -323,6 +323,26 @@ class StreamPage:
         return base64.b64encode(self.body).decode()
 
 
+def test_new_si_names_keep_indexes_across_http_and_browser_fallback(tmp_path):
+    from types import SimpleNamespace
+
+    folder = tmp_path / "12_IF7.2_J. Test_一区_2024_A_title"
+    session = SimpleNamespace(
+        get=lambda url, **_: StreamResponse(url, status=500 if "second" in url else 200)
+    )
+    urls = ["https://cdn.test/first.csv", "https://cdn.test/second.csv"]
+    downloader = HttpSupplementDownloader()
+    status, files, _ = downloader._download_discovered_urls(session, StreamPage(), urls, folder)
+    assert status == "downloaded"
+    assert [item.name for item in files] == [
+        "12_IF7.2_J. Test_一区_2024_si1_A_title.csv",
+        "12_IF7.2_J. Test_一区_2024_si2_A_title.csv"
+    ]
+    status, files, _ = downloader._download_discovered_urls(session, StreamPage(), urls, folder)
+    assert status == "cached"
+    assert len(list((folder / "supplements").iterdir())) == 2
+
+
 def test_discovered_links_use_http_before_browser_and_reuse_cache(tmp_path):
     from types import SimpleNamespace
 

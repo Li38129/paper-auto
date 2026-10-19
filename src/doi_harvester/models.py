@@ -28,6 +28,7 @@ class ArticleMetadata:
     year: int | None = None
     landing_url: str = ""
     candidates: list[DownloadCandidate] = field(default_factory=list)
+    journal_abbreviation: str = ""
 
 
 @dataclass(slots=True)
