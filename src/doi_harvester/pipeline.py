@@ -401,8 +401,13 @@ class Harvester:
         result.supplements = artifacts
         result.supplement_attempts = attempts
         if status not in {"downloaded", "cached", "not_found"}:
-            result.success = False
-            result.reason = status
+            # SI 结果只写入补充材料状态：正文已保存时不得判为失败；
+            # 正文失败时保留正文自身的失败信号，不得被 SI 状态覆盖。
+            if not result.success and not result.reason:
+                result.reason = (
+                    result.attempts[-1].reason if result.attempts else result.status
+                )
+            LOGGER.debug("SI 状态单独记录：%s -> %s", result.doi, status)
 
     def _metadata(self, doi: str) -> ArticleMetadata:
         try:

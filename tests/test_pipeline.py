@@ -384,3 +384,74 @@ def test_opened_edge_with_unconfirmed_content_does_not_block_body_cache(tmp_path
     assert result.success and result.status == "cached"
     assert result.pdf_path == pdf
     assert worker.browser_options["channel"] == "msedge"
+
+
+def _patch_supplements(monkeypatch, status: str) -> None:
+    """把 SI 下载结果固定为指定状态，避免测试依赖网络。"""
+    from doi_harvester import supplements
+
+    class FakeSupplementDownloader:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def download(self, **_kwargs: object):
+            return status, [], []
+
+    monkeypatch.setattr(supplements, "HttpSupplementDownloader", FakeSupplementDownloader)
+
+
+def test_unconfirmed_supplements_do_not_fail_saved_article(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _patch_supplements(monkeypatch, "unconfirmed")
+    harvester = Harvester(
+        output_dir=tmp_path,
+        crossref=FakeCrossref(),
+        openalex=FakeOpenAlex(),
+        transport=FakeTransport(succeeds=True),
+        download_supplements=True,
+    )
+
+    result = harvester.download("10.1000/example")
+
+    assert result.success is True
+    assert result.status == "downloaded"
+    assert result.supplement_status == "unconfirmed"
+    assert result.reason == ""
+
+
+def test_failed_article_keeps_its_own_failure_reason(monkeypatch, tmp_path: Path) -> None:
+    _patch_supplements(monkeypatch, "unconfirmed")
+    harvester = Harvester(
+        output_dir=tmp_path,
+        crossref=FakeCrossref(),
+        openalex=FakeOpenAlex(),
+        transport=FakeTransport(succeeds=False),
+        download_supplements=True,
+    )
+
+    result = harvester.download("10.1000/example")
+
+    assert result.success is False
+    # 失败原因来自正文自身尝试，而不是 SI 状态
+    assert result.reason == "http_403"
+    assert result.supplement_status == "unconfirmed"
+
+
+def test_existing_failure_reason_survives_supplement_status(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _patch_supplements(monkeypatch, "partial")
+    harvester = Harvester(output_dir=tmp_path, download_supplements=True)
+    result = DownloadResult(
+        doi="10.1000/example",
+        success=False,
+        status="subscription_required",
+        reason="subscription_required",
+        article_dir=tmp_path / "paper",
+    )
+
+    harvester._add_supplements(result)
+
+    assert result.reason == "subscription_required"
+    assert result.supplement_status == "partial"
