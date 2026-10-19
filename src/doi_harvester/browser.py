@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -47,6 +48,11 @@ PDF_SELECTORS = (
     'a[href*="/content/pdf/"]',
     'a[href*="/content/articlepdf/"]',
     'a[href*="/article-pdf/"]',
+    # ScienceDirect：正文页以 /pdfft 或 /pii/<PII>/pdf 形式暴露“View PDF”
+    'a[href*="/pdfft"]',
+    'a[href*="/pii/"][href*="/pdf"]',
+    # 兜底：具体链接由 _looks_like_article_pdf_url 再筛选，避免收进非正文 PDF
+    'a[href*="/pdf"]',
     'a[aria-label*="PDF" i]',
     'a[title*="PDF" i]',
 )
@@ -397,8 +403,22 @@ def _looks_like_article_pdf_url(url: str) -> bool:
         "/content/pdf/",
         "/content/articlepdf/",
         "/article-pdf/",
+        # ScienceDirect 的 PDF 中转入口，需由浏览器跟进 JS 挑战后才得到正文
+        "/pdfft",
     )
-    return any(marker in lowered for marker in markers)
+    if any(marker in lowered for marker in markers):
+        return True
+    if "/pii/" in lowered and re.search(r"/pdf(?:[?#]|$)", lowered) is not None:
+        # ScienceDirect 旧档案使用 /science/article/pii/<PII>/pdf?md5=... 形式
+        return True
+    # IOP 等出版社的正文接口形如 /article/<标识>/pdf（标识本身含斜杠），同样需要浏览器会话
+    return re.search(r"/article/[^?#]*/pdf(?:[?#]|$)", lowered) is not None
+
+
+def _science_direct_pii(url: str) -> str:
+    """取 ScienceDirect 链接中的 PII，用于确认 PDF 属于当前正文页。"""
+    match = re.search(r"/pii/([A-Za-z0-9()\-]+)", url or "")
+    return match.group(1).upper() if match else ""
 
 
 def _matches_expected_article_url(url: str, expected_urls: set[str]) -> bool:
@@ -983,6 +1003,10 @@ class BrowserPdfDownloader:
         urls = self._collect_urls(page=page, candidate_urls=candidate_urls)
         denied_response: tuple[str, int] | None = None
         for url in urls:
+            # 挑战类中转地址（如 ScienceDirect /pdfft）纯 HTTP 永远返回 HTML，
+            # 交给下面的浏览器导航兜底，避免无意义的请求与连接占用
+            if "/pdfft" in url.lower():
+                continue
             response = context.request.get(
                 url,
                 headers={
@@ -1034,6 +1058,19 @@ class BrowserPdfDownloader:
         if surface_result is not None:
             return surface_result
 
+        # 挑战类中转地址（如 ScienceDirect /pdfft）只能由浏览器导航后取得正文；
+        # 放在点击之前，避免在必然失败的点击上等待下载事件超时
+        if any("/pdfft" in item.lower() for item in urls):
+            navigation_result = self._download_by_navigation(
+                context=context,
+                candidates=urls,
+                destination=destination,
+                temporary=temporary,
+                expected_pii=_science_direct_pii(str(page.url)),
+            )
+            if navigation_result is not None:
+                return navigation_result
+
         click_result = self._download_by_click(page=page, temporary=temporary)
         if click_result and is_valid_pdf(temporary):
             size = temporary.stat().st_size
@@ -1057,6 +1094,17 @@ class BrowserPdfDownloader:
         if surface_result is not None:
             return surface_result
 
+        # 其他出版社的挑战式中转地址同样按导航兜底处理
+        navigation_result = self._download_by_navigation(
+            context=context,
+            candidates=urls,
+            destination=destination,
+            temporary=temporary,
+            expected_pii=_science_direct_pii(str(page.url)),
+        )
+        if navigation_result is not None:
+            return navigation_result
+
         final_status = wait_for_verification(page)
         reason = (
             final_status
@@ -1078,6 +1126,92 @@ class BrowserPdfDownloader:
             final_url=page.url,
             status_code=denied_response[1] if denied_response and denied_reason else None,
         )
+
+    def _download_by_navigation(
+        self,
+        *,
+        context: object,
+        candidates: list[str],
+        destination: Path,
+        temporary: Path,
+        expected_pii: str = "",
+    ) -> Attempt | None:
+        """用临时标签跟进只返回 JS 挑战页的 PDF 中转地址。
+
+        ScienceDirect 的 /pdfft 与 /pii/<PII>/pdf 默认返回 HTML 挑战页，
+        由页面脚本换取带签名的 pdf.sciencedirectassets.com 地址；纯 HTTP 请求
+        永远拿不到正文，只有在浏览器里导航才能落到真实 PDF。
+        """
+        for url in candidates:
+            lowered = url.lower()
+            is_redirect_entry = "/pdfft" in lowered or re.search(r"/pdf(?:[?#]|$)", lowered)
+            if not is_redirect_entry:
+                continue
+            # 正文页给出 PII 时只跟进同一 PII 的 PDF，避免取到相关推荐文章
+            candidate_pii = _science_direct_pii(url)
+            if expected_pii and candidate_pii and candidate_pii != expected_pii:
+                continue
+            scratch: object | None = None
+            captured: dict[str, object] = {}
+            try:
+                scratch = context.new_page()
+                # 浏览器可能把 PDF 当下载处理，此时只能从 download 事件取字节
+                scratch.on(
+                    "download",
+                    lambda item, bucket=captured: bucket.setdefault("download", item),
+                )
+                try:
+                    scratch.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=min(self.timeout_ms, 45_000),
+                    )
+                except Exception:  # noqa: BLE001
+                    # 挑战页跳转 PDF 时导航常被中断，继续等待下载事件或页内正文
+                    LOGGER.debug("中转页导航被中断，继续等待：%s", url)
+                deadline = time.monotonic() + min(self.timeout_ms, 30_000) / 1000
+                while time.monotonic() < deadline:
+                    download = captured.get("download")
+                    if download is not None:
+                        try:
+                            download.save_as(str(temporary))
+                        except Exception:  # noqa: BLE001
+                            LOGGER.debug("下载事件保存失败：%s", url)
+                        if is_valid_pdf(temporary):
+                            size = temporary.stat().st_size
+                            temporary.replace(destination)
+                            return Attempt(
+                                source="browser",
+                                url=url,
+                                success=True,
+                                reason="downloaded",
+                                final_url=str(scratch.url),
+                                bytes_written=size,
+                            )
+                    page_pdf = self._fetch_pdf_from_page(page=scratch)
+                    if page_pdf is not None:
+                        body, status_code, content_type, final_url = page_pdf
+                        temporary.write_bytes(body)
+                        temporary.replace(destination)
+                        return Attempt(
+                            source="browser",
+                            url=final_url,
+                            success=True,
+                            reason="downloaded",
+                            status_code=status_code,
+                            content_type=content_type,
+                            final_url=final_url,
+                            bytes_written=len(body),
+                        )
+                    scratch.wait_for_timeout(1000)
+                LOGGER.debug("中转页未产出 PDF：%s（当前 %s）", url, scratch.url)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("导航兜底异常：%s（%s）", url, exc)
+            finally:
+                if scratch is not None:
+                    with contextlib.suppress(Exception):
+                        scratch.close()
+        return None
 
     def _download_from_surfaces(
         self,

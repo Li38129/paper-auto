@@ -13,7 +13,9 @@ from doi_harvester.browser import (
     ProfileInUseError,
     ProfileLock,
     _launch_options,
+    _looks_like_article_pdf_url,
     _matches_expected_article_url,
+    _science_direct_pii,
     browser_proxy_from_environment,
     classify_page,
     wait_for_authorization,
@@ -691,3 +693,152 @@ def test_browser_does_not_extract_links_from_another_doi(tmp_path):
         candidate_urls=["https://publisher.test/article.pdf"],
     )
     assert not result.success and result.reason == "no_pdf_unconfirmed_article"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.sciencedirect.com/science/article/pii/S0378775313005600/pdfft?md5=a", True),
+        ("https://www.sciencedirect.com/science/article/pii/0167273883902473/pdf?md5=a", True),
+        ("https://iopscience.iop.org/article/10.1149/1.2988731/pdf", True),
+        ("https://publisher.test/reference/123.pdf", False),
+        ("https://publisher.test/static/logo.pdf", False),
+        ("https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/aenm.202506351", True),
+    ],
+)
+def test_article_pdf_url_recognises_publisher_entries(url: str, expected: bool) -> None:
+    assert _looks_like_article_pdf_url(url) is expected
+
+
+def test_science_direct_pii_is_extracted() -> None:
+    url = "https://www.sciencedirect.com/science/article/pii/S0378775313005600/pdfft?md5=a"
+
+    assert _science_direct_pii(url) == "S0378775313005600"
+    assert _science_direct_pii("https://iopscience.iop.org/article/10.1149/1.2988731/pdf") == ""
+
+
+class NavigationPage:
+    """模拟挑战中转页：goto 之后落到最终 PDF 地址。"""
+
+    def __init__(
+        self,
+        *,
+        final_url: str = "",
+        body: bytes = b"",
+        download_body: bytes = b"",
+    ) -> None:
+        self.url = "about:blank"
+        self._final_url = final_url
+        self._body = body
+        self._download_body = download_body
+        self._handler = None
+        self.closed = False
+
+    def on(self, event: str, handler) -> None:
+        if event == "download":
+            self._handler = handler
+
+    def goto(self, _url: str, **_kwargs: object) -> None:
+        if self._final_url:
+            self.url = self._final_url
+        if self._download_body and self._handler is not None:
+            payload = self._download_body
+
+            class Download:
+                def save_as(self, path: str) -> None:
+                    Path(path).write_bytes(payload)
+
+            self._handler(Download())
+
+    def wait_for_timeout(self, _timeout: int) -> None:
+        return None
+
+    def evaluate(self, _script: str, *_args: object):
+        if not self._body:
+            return {
+                "status": 403,
+                "contentType": "text/html",
+                "finalUrl": self.url,
+                "body": base64.b64encode(b"blocked").decode("ascii"),
+            }
+        return {
+            "status": 200,
+            "contentType": "application/pdf",
+            "finalUrl": self.url,
+            "body": base64.b64encode(self._body).decode("ascii"),
+        }
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class NavigationContext:
+    def __init__(self, page: NavigationPage) -> None:
+        self.page = page
+        self.new_page_calls = 0
+
+    def new_page(self) -> NavigationPage:
+        self.new_page_calls += 1
+        return self.page
+
+
+def test_navigation_follows_challenge_entry_and_saves_pdf(tmp_path: Path) -> None:
+    body = b"%PDF-1.7\n" + b"x" * 2048
+    final = "https://pdf.sciencedirectassets.com/1-s2.0-S0378775313005600/main.pdf?sig=a"
+    page = NavigationPage(final_url=final, body=body)
+    context = NavigationContext(page)
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path / "profile")
+    destination = tmp_path / "article.pdf"
+
+    result = downloader._download_by_navigation(
+        context=context,
+        candidates=[
+            "https://www.sciencedirect.com/science/article/pii/S0378775313005600/pdfft?md5=a"
+        ],
+        destination=destination,
+        temporary=tmp_path / "article.pdf.part",
+        expected_pii="S0378775313005600",
+    )
+
+    assert result is not None and result.success is True
+    assert destination.read_bytes() == body
+    assert context.new_page_calls == 1
+    assert page.closed is True
+
+
+def test_navigation_skips_candidates_of_other_pii(tmp_path: Path) -> None:
+    page = NavigationPage(final_url="https://example.test/x.pdf", body=b"%PDF-1.7\n")
+    context = NavigationContext(page)
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path / "profile")
+
+    result = downloader._download_by_navigation(
+        context=context,
+        candidates=[
+            "https://www.sciencedirect.com/science/article/pii/S1111111111111111/pdfft?md5=a"
+        ],
+        destination=tmp_path / "article.pdf",
+        temporary=tmp_path / "article.pdf.part",
+        expected_pii="S0378775313005600",
+    )
+
+    assert result is None
+    assert context.new_page_calls == 0
+
+
+def test_navigation_uses_download_event_when_browser_downloads(tmp_path: Path) -> None:
+    body = b"%PDF-1.7\n" + b"d" * 2048
+    # 页面停留在非 PDF 地址，只能通过 download 事件取到正文
+    page = NavigationPage(final_url="", body=b"", download_body=body)
+    context = NavigationContext(page)
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path / "profile")
+    destination = tmp_path / "article.pdf"
+
+    result = downloader._download_by_navigation(
+        context=context,
+        candidates=["https://iopscience.iop.org/article/10.1149/1.2988731/pdf"],
+        destination=destination,
+        temporary=tmp_path / "article.pdf.part",
+    )
+
+    assert result is not None and result.success is True
+    assert destination.read_bytes() == body
