@@ -16,7 +16,7 @@
 - 支持 Springer 与 ACS 的稳定正文 URL 规则；
 - 对 HTTP 200 的 HTML 登录页、验证码页等伪 PDF 做魔数与最小尺寸校验；
 - 使用 `.part` 临时文件和原子替换，失败不会留下损坏 PDF；
-- 正文 PDF 与论文目录同名（`<目录名>.pdf`），已有有效 `article.pdf` 仍可作为缓存识别；
+- 新目录和正文 PDF 使用 `序号_IF值_期刊简称_一区/顶刊/二区/三区_发表年份_论文题名`（正文加 `.pdf`），SI 使用 `序号_IF值_期刊简称_分区_发表年份_si序号_论文题名.原扩展名`；已有目录和有效文件仍按原路径复用；
 - 前台和后台任务默认在 `temp/doi-harvester/jobs/<job_id>` 保存报告；`--report-dir` 可指定报告目录；
 - 内置 `$autopaper-literature` 仓库 Skill，持续维护 Excel 文献清单并把正文写入稳定编号目录；
 - 可读取 Skill 生成的 `papers.json`，把正文直接写入既有编号目录；
@@ -65,6 +65,17 @@ Skill 会按顺序完成检索与去重、维护 `C:\papers\LPSC\文献检索汇
 
 如果从其他目录调用个人版 `$literature-search-organizer`，可将 `AUTOPAPER_ROOT`
 设置为本仓库的绝对路径；仓库版 Skill 会优先从当前 Git 根目录自动定位项目。
+
+## AI 论文精读与评估
+
+项目 Skill `$ai-paper-analysis` 用于阅读 AI 相关论文，核查数据集与划分、模型输入和架构、相对 baseline 的创新与提升、实验指标及结论可信度。例如：
+
+```text
+$ai-paper-analysis 阅读这篇论文的 PDF，检查数据集划分和模型输入，画出架构图，
+比较 baseline 与消融结果，并分析结果可信度和可改进之处。
+```
+
+可以提供研究主题、题名、DOI、链接或本地 PDF。若论文公开数据集，Skill 会给出核验过的下载入口供你保存；数据尚未在本地时，先依据论文披露内容分析并标明未检查原始数据。精读本身不启动 DOI Harvester；需要下载正文时另行使用 `$autopaper-literature`。
 
 ## 使用
 
@@ -296,7 +307,7 @@ temp/               被 Git 忽略的运行环境、缓存、交换文件和临�
 
 ## 统一检查点与附件回退
 
-CLI 的 `--doi`、`--doi-file`、`--papers-file` 在正文、仅 SI、正文加 SI 三种模式下均先创建任务，打印任务 ID，再在当前终端执行；`--detach` 仅将同一任务交给 Broker。所有模式禁止 `--overwrite`，有效缓存按现有规则复用。单 DOI/DOI 列表沿用 DOI 目录名，`papers.json` 保留原编号和指定绝对目录。
+CLI 的 `--doi`、`--doi-file`、`--papers-file` 在正文、仅 SI、正文加 SI 三种模式下均先创建任务，打印任务 ID，再在当前终端执行；`--detach` 仅将同一任务交给 Broker。所有模式禁止 `--overwrite`，有效缓存按现有规则复用。单 DOI/DOI 列表的新目录使用本次序号、题名和发表年份，IF 和分区缺少核验资料时标为未核实；已有 DOI 目录仍沿用。文献检索工作流从汇总记录读取 IF 与中科院分区，明确 TOP/顶刊时标为顶刊，四区如实保留。`papers.json` 保留原编号和指定绝对目录，旧目录的 SI 命名兼容原缓存。各字段以下划线分隔，非法字符清理，长名称截断为 160 个字符；缺失题名时用 DOI 区分条目。
 
 每篇开始前持久化运行状态，结束后保存结果。报告、SI CSV 和可选 Excel 按 `--batch-size` 同步（默认 100），并在暂停、失败和结束时同步。终端 Ctrl+C 保留任务和报告；使用 `jobs status <job_id>` 检查，再用 `jobs resume <job_id>` 恢复，后台恢复需加 `--detach`。强制结束进程后先等待任务被识别为 stalled，再恢复原 ID。旧任务缺少 SI 参数时仍为正文模式，目录映射不变。
 
@@ -321,3 +332,5 @@ CLI `--challenge-policy skip` 在确认的验证/登录页面结束当前篇处�
 每次独立验证码/登录页面每秒检查，最多10秒，提前恢复就继续。仍需人工验证则按 pause/skip 处理。下载的 --challenge-timeout/--interactive-wait 参数保留兼容，不再隐式延长等待；独立 auth 命令不变。
 
 临时代码放在 `temp/doi-harvester/task-scripts/<任务或目标ID>/`，附用途、输入输出、命令和恢复说明；调用 CLI/MCP 或公开接口，不直接写数据库，不把临时 DOI、路径或顺序硬编码进生产代码。详见 AGENTS.md；失败或未完成目录保留，临时脚本不提交 Git。
+
+期刊简称通过 `journal_abbreviation` 明确提供（固定 CSV 可用“期刊简称”列），或读取 Crossref 的 `short-container-title`；缺少可靠简称时标为 `期刊简称未核实`，不自行生成首字母缩写。简称中的下划线替换为空格，已有目录继续保留。

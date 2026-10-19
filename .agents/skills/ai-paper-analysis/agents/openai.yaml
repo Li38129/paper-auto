@@ -1,0 +1,6 @@
+interface:
+  display_name: "AI 论文精读与评估"
+  short_description: "核查 AI 论文的数据、模型架构、实验提升和结论可信度"
+  default_prompt: "Use $ai-paper-analysis to read this AI paper, draw its model architecture, and evaluate its dataset, inputs, baselines, results, and reliability."
+policy:
+  allow_implicit_invocation: true
