@@ -49,11 +49,11 @@ description: Search, verify, deduplicate, and rank academic literature, maintain
 
 检索完成且目标目录已确定后，先读取并严格执行 [Excel 汇总规则](references/workbook.md)。必须先成功创建或更新 `文献检索汇总.xlsx`，再创建论文目录或启动下载。
 
-所有新汇总表使用项目 `reference/文献检索汇总模板.xlsx` 的单页版式。正文下载结果旁设置 `SI是否下载成功` 列；SI 汇总状态写在该列，不创建“补充材料”工作表。
+所有新汇总表使用项目 `reference/文献检索汇总模板.xlsx` 的当前版式：列数、列序与列名以该模板为准，用户可随时更新模板，写脚本不得硬编码列序；模板可以没有表格对象，也不要求固定列数。模板缺少必需列时按 [Excel 汇总规则](references/workbook.md) 报错并说明缺哪一列。SI 汇总状态写在 `SI是否下载成功` 列（模板提供该列时），不创建“补充材料”工作表。
 
 - Excel 中已有序号和目录名不可改变；新文献按本次排序追加到当前最大序号之后。
 - 新记录由工作簿脚本生成 `序号_IF值_期刊简称_一区/顶刊/二区/三区_发表年份_论文题名`，各字段以下划线分隔；`folder_label` 仅兼容旧输入，不参与新目录命名。脚本返回最终 `folder_name` 和绝对 `folder_path`。
-- 每条汇总记录填写 `cas_quartile`、`impact_factor` 和 `journal_metrics_source`；值缺乏可核验依据时写“未核实”，来源字段说明分区版本、IF 年份及对应来源。旧版 18 列工作簿按 Excel 汇总规则扩展字段，保留原有记录与编号。
+- 每条汇总记录填写 `cas_quartile`、`impact_factor` 和 `journal_metrics_source`；值缺乏可核验依据时写“未核实”，来源字段说明分区版本、IF 年份及对应来源。模板提供这些列时分别写入 `中科院分区`、`影响因子（IF）`、`分区/IF依据`；模板未提供的字段不写入，也不得为此改动模板。
 - Excel 不兼容、被占用或写入失败时立即停止，不得留下未汇总的新目录或下载任务。
 
 ## 创建论文目录与按确认模式下载
