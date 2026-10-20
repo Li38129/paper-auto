@@ -4,7 +4,8 @@ import process from "node:process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-const HEADERS = [
+// 列以参考模板为准：运行时从模板读取表头，这里只保留默认值供读取模板前的占位。
+let HEADERS = [
   "序号",
   "目录名",
   "论文题名",
@@ -28,8 +29,9 @@ const HEADERS = [
   "影响因子（IF）",
   "分区/IF依据",
 ];
-const PREVIOUS_HEADERS = HEADERS.filter((header) => header !== "SI是否下载成功");
-const LEGACY_HEADERS = PREVIOUS_HEADERS.slice(0, 18);
+// 表头行：模板与工作簿都在前 10 行内定位到含「序号」的一行。
+const HEADER_SCAN_ROWS = 10;
+const HEADER_SCAN_COLUMNS = 40;
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATE = path.resolve(
@@ -267,49 +269,44 @@ async function loadWorkbook(artifact, workbookPath, templatePath) {
   return artifact.SpreadsheetFile.importXlsx(input);
 }
 
-function resolveTable(workbook) {
+function detectHeaderRow(sheet) {
+  for (let row = 0; row < HEADER_SCAN_ROWS; row += 1) {
+    const values = sheet.getRangeByIndexes(row, 0, 1, 3).values?.[0] ?? [];
+    if (values.some((value) => cleanText(value) === "序号")) {
+      return row;
+    }
+  }
+  throw new Error("未找到表头行：前 10 行中没有包含「序号」的行。");
+}
+
+function readHeaders(sheet, headerRow) {
+  const values = sheet.getRangeByIndexes(headerRow, 0, 1, HEADER_SCAN_COLUMNS).values?.[0] ?? [];
+  const headers = values.map((value) => cleanText(value));
+  while (headers.length && !headers[headers.length - 1]) {
+    headers.pop();
+  }
+  if (!headers.length) {
+    throw new Error("表头为空，无法确定工作簿列。");
+  }
+  return headers;
+}
+
+/** 解析模板或工作簿的表结构；列序与列名一律以文件内容为准。 */
+function resolveSheet(workbook, { sheetName = "文献清单" } = {}) {
   let sheet;
   try {
-    sheet = workbook.worksheets.getItem("文献清单");
+    sheet = workbook.worksheets.getItem(sheetName);
   } catch {
-    throw new Error("工作簿缺少工作表“文献清单”。");
+    throw new Error(`工作簿缺少工作表“${sheetName}”。`);
   }
-  const table = sheet.tables.items.find((item) => item.name === "LiteratureTable");
-  if (!table) {
-    throw new Error("工作簿缺少表格 LiteratureTable。");
-  }
-  const actualHeaders = table.getHeaderRowRange().values[0].map((value) => cleanText(value));
-  const current = actualHeaders.length === HEADERS.length
-    && actualHeaders.every((value, index) => value === HEADERS[index]);
-  const previous = actualHeaders.length === PREVIOUS_HEADERS.length
-    && actualHeaders.every((value, index) => value === PREVIOUS_HEADERS[index]);
-  const legacy = actualHeaders.length === LEGACY_HEADERS.length
-    && actualHeaders.every((value, index) => value === LEGACY_HEADERS[index]);
-  if (!current && !previous && !legacy) {
-    throw new Error("LiteratureTable 字段与 AutoPaper 模板不兼容，原文件未修改。");
-  }
-  return { sheet, table, headers: actualHeaders, legacy, migration: !current };
+  const headerRow = detectHeaderRow(sheet);
+  const headers = readHeaders(sheet, headerRow);
+  return { sheet, headers, headerRow };
 }
 
-function readTableRows(sheet, headers) {
-  const values = sheet.getRangeByIndexes(4, 0, 4996, headers.length).values ?? [];
+function readTableRows(sheet, headers, headerRow) {
+  const values = sheet.getRangeByIndexes(headerRow + 1, 0, 4996, headers.length).values ?? [];
   return values.filter((row) => !isBlankRow(row)).map((row) => rowToObject(row, headers));
-}
-
-function readLegacySiStatuses(workbook) {
-  let sheet;
-  try { sheet = workbook.worksheets.getItem("补充材料"); }
-  catch { return new Map(); }
-  const statuses = new Map();
-  for (const row of (sheet.getUsedRange()?.values ?? []).slice(1)) {
-    const doi = normalizeDoi(row[1]);
-    if (!doi) continue;
-    const status = cleanText(row[2]);
-    const value = ["downloaded", "cached"].includes(status) ? "是"
-      : status === "pending" ? "未尝试" : "否";
-    statuses.set(doi, value);
-  }
-  return statuses;
 }
 
 function updateRowMap(rows) {
@@ -452,26 +449,18 @@ function supplementSuccess(result) {
   return "否";
 }
 
-function writeRowsToTable(sheet, table, rows, existingCount) {
+function writeRowsToSheet(sheet, rows, headerRow, existingCount) {
   const targetRows = rows.map(objectToRow);
 
   if (!targetRows.length) {
     throw new Error("工作簿不能保存空文献清单。");
   }
-
-  const overwriteCount = Math.min(existingCount, targetRows.length);
-  if (overwriteCount > 0) {
-    sheet.getRangeByIndexes(4, 0, overwriteCount, HEADERS.length).values = targetRows.slice(
-      0,
-      overwriteCount,
-    );
-  }
-  if (targetRows.length > existingCount) {
-    table.rows.add(null, targetRows.slice(existingCount));
-  }
   if (existingCount > targetRows.length) {
-    throw new Error("工作簿包含无法安全收缩的多余表格行，原文件未修改。");
+    throw new Error("工作簿包含无法安全收缩的多余数据行，原文件未修改。");
   }
+  // 模板不再要求表格对象，直接按表头行列宽写入全部数据行
+  sheet.getRangeByIndexes(headerRow + 1, 0, targetRows.length, HEADERS.length).values =
+    targetRows;
 }
 
 async function saveAtomically(artifact, workbook, workbookPath) {
@@ -531,26 +520,29 @@ async function main() {
   }
 
   const artifact = await loadArtifactTool(nodeModulesPath);
+  // 先取模板表头：工作簿的列序与列名一律以模板为准
+  const templateWorkbook = await artifact.SpreadsheetFile.importXlsx(
+    await artifact.FileBlob.load(templatePath),
+  );
+  const template = resolveSheet(templateWorkbook);
+  HEADERS = template.headers;
+
   let workbook = await loadWorkbook(artifact, workbookPath, templatePath);
-  const source = resolveTable(workbook);
-  const rows = readTableRows(source.sheet, source.headers);
+  let current = resolveSheet(workbook);
+  let rows = readTableRows(current.sheet, current.headers, current.headerRow);
   let existingCount = rows.length;
-  const siStatuses = source.migration ? readLegacySiStatuses(workbook) : new Map();
-  if (source.migration) {
-    for (const row of rows) {
-      row["SI是否下载成功"] = siStatuses.get(normalizeDoi(row.DOI)) || (row.DOI ? "未尝试" : "不适用");
-    }
-    workbook = await artifact.SpreadsheetFile.importXlsx(await artifact.FileBlob.load(templatePath));
+  const mismatched =
+    current.headers.length !== HEADERS.length
+    || current.headers.some((value, index) => value !== HEADERS[index]);
+  if (mismatched) {
+    // 表头与模板不一致：按表头名称迁移到模板布局，可映射的列保留，其余丢弃
+    workbook = await artifact.SpreadsheetFile.importXlsx(
+      await artifact.FileBlob.load(templatePath),
+    );
+    current = resolveSheet(workbook);
     existingCount = 0;
   }
-  const { sheet, table } = resolveTable(workbook);
-  const legacy = source.legacy;
-  if (legacy) {
-    for (const row of rows) {
-      row["中科院分区"] = "未核实";
-      row["影响因子（IF）"] = "未核实";
-    }
-  }
+  const { sheet, headerRow } = current;
   let resolved = null;
 
   if (recordsPath) {
@@ -562,7 +554,7 @@ async function main() {
     applyReport(rows, results);
   }
 
-  writeRowsToTable(sheet, table, rows, existingCount);
+  writeRowsToSheet(sheet, rows, headerRow, existingCount);
   workbook.recalculate();
   await saveAtomically(artifact, workbook, workbookPath);
 
