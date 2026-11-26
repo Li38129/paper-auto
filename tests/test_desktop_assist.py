@@ -8,9 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from doi_harvester import desktop_assist
 from doi_harvester.desktop_assist import (
     AssistOutcome,
+    DesktopAssistError,
+    NativePointer,
     WindowsMcpDesktop,
+    _desktop_input_held,
     challenge_screen_point,
     click_point,
     local_environment,
@@ -164,11 +168,84 @@ def test_resolve_challenge_reports_failure_after_attempts() -> None:
     assert len(controller.clicks) == 2
 
 
-def test_resolve_challenge_without_controller_is_not_attempted() -> None:
-    page = FakePage([FakeFrame("https://challenges.cloudflare.com/x")])
-    outcome = resolve_challenge(page, classify=lambda _page: "challenge_required", controller=None)
-    assert outcome.attempted is False
-    assert "未配置桌面辅助" in outcome.detail
+def test_resolve_challenge_without_controller_falls_back_to_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clicks: list[tuple[int, int]] = []
+
+    def fake_native_click(x: int, y: int, *, button: str = "left", hold_ms: int = 40) -> str:
+        clicks.append((x, y))
+        return f"native clicked {x},{y}"
+
+    monkeypatch.setattr(desktop_assist, "native_click", fake_native_click)
+    page = FakePage(
+        [
+            FakeFrame(
+                "https://challenges.cloudflare.com/x",
+                {"x": 100.0, "y": 200.0, "width": 300.0, "height": 65.0},
+            )
+        ]
+    )
+    outcome = resolve_challenge(page, classify=lambda _page: "ready", controller=None)
+    assert outcome.attempted is True
+    assert outcome.passed is True
+    assert clicks == [(186, 326)]
+
+
+def test_resolve_challenge_switches_to_native_when_input_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """windows-mcp 把控制权判给用户时，直接用进程内注入完成点击。"""
+
+    class HoldingController:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def click(self, x: int, y: int) -> str:
+            self.attempts += 1
+            raise DesktopAssistError(
+                'click 返回错误{"code": "USER_CONTROL", "status": {"state": "user"}}'
+            )
+
+    native: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        desktop_assist,
+        "native_click",
+        lambda x, y, **_: native.append((x, y)) or f"native clicked {x},{y}",
+    )
+    page = FakePage(
+        [
+            FakeFrame(
+                "https://challenges.cloudflare.com/x",
+                {"x": 0.0, "y": 0.0, "width": 100.0, "height": 100.0},
+            )
+        ]
+    )
+    controller = HoldingController()
+    outcome = resolve_challenge(page, classify=lambda _page: "ready", controller=controller)
+    assert outcome.attempted is True
+    assert outcome.passed is True
+    assert controller.attempts == 1
+    assert native == [(66, 144)]
+
+
+def test_desktop_input_held_recognizes_both_error_codes() -> None:
+    assert _desktop_input_held('{"code": "USER_CONTROL"}') is True
+    assert _desktop_input_held('{"code": "PHYSICAL_INPUT_HELD"}') is True
+    assert _desktop_input_held('{"state": "user"}') is True
+    assert _desktop_input_held("SetCursorPos(1, 2) 失败") is False
+
+
+def test_native_pointer_delegates_to_native_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    moves: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        desktop_assist, "native_move", lambda x, y: moves.append((x, y)) or f"moved {x},{y}"
+    )
+    pointer = NativePointer()
+    assert pointer.name == "native"
+    assert pointer.move(5, 6) == "moved 5,6"
+    assert moves == [(5, 6)]
+    pointer.close()
 
 
 def test_managed_command_candidates_prefers_explicit_command(
