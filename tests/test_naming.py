@@ -104,10 +104,10 @@ const assert = require('assert');
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const context = {path: require('path')};
 vm.createContext(context);
-vm.runInContext(source.slice(source.indexOf('const HEADERS ='),
-  source.indexOf('const PREVIOUS_HEADERS =')), context);
+vm.runInContext(source.slice(source.indexOf('let HEADERS ='),
+  source.indexOf('const HEADER_SCAN_ROWS =')), context);
 vm.runInContext(source.slice(source.indexOf('function normalizeDoi('),
-  source.indexOf('function resolveTable(')), context);
+  source.indexOf('async function loadArtifactTool(')), context);
 vm.runInContext(source.slice(source.indexOf('function updateRowMap('),
   source.indexOf('function applyReport(')), context);
 const rows = [{'序号': 9, '目录名': '9旧目录', DOI: '10.1000/old',

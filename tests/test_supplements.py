@@ -323,6 +323,36 @@ class StreamPage:
         return base64.b64encode(self.body).decode()
 
 
+@pytest.mark.parametrize("route", ["http", "browser"])
+def test_long_si_directory_preserves_files_and_handles_changed_content(tmp_path, route):
+    from types import SimpleNamespace
+
+    # 模拟目录已固定、仅剩短文件名空间，正文与附件都不可重编号。
+    prefix_units = len(str(tmp_path.absolute()).encode("utf-16-le")) // 2
+    folder = tmp_path / ("a" * (220 - prefix_units - 1 - len("/supplements")))
+    downloader = HttpSupplementDownloader()
+    url = "https://cdn.test/supporting-information.csv"
+
+    def download(body):
+        if route == "browser":
+            return downloader._download_browser_urls(StreamPage(body=body), [url], folder)
+        session = SimpleNamespace(get=lambda url, **_: StreamResponse(url, body=body))
+        return downloader._download_urls(session, [url], folder)
+
+    status, files, _ = download(b"a,b\n1,2")
+    assert status == "downloaded"
+    first = Path(files[0].path)
+    assert first.parent == folder / "supplements"
+    assert len(str(first.absolute()).encode("utf-16-le")) // 2 < 240
+    status, files, _ = download(b"a,b\n3,4")
+    assert status == "downloaded"
+    assert Path(files[0].path) != first
+    assert first.read_bytes() == b"a,b\n1,2"
+    assert Path(files[0].path).read_bytes() == b"a,b\n3,4"
+    assert len(str(Path(files[0].path).absolute()).encode("utf-16-le")) // 2 < 240
+    assert download(b"a,b\n3,4")[0] == "cached"
+
+
 def test_new_si_names_keep_indexes_across_http_and_browser_fallback(tmp_path):
     from types import SimpleNamespace
 

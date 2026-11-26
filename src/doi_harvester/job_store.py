@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .filesystem import display_path
 from .models import DownloadResult
 
 JOB_STATUSES = {
@@ -393,11 +394,11 @@ class JobStore:
                 """,
                 (
                     item_status,
-                    str(result.pdf_path or ""),
+                    display_path(result.pdf_path) if result.pdf_path else "",
                     result.source,
                     result.reason or ("" if result.success else result.status),
                     result.supplement_status,
-                    json.dumps([asdict(item) for item in result.supplements], ensure_ascii=False),
+                    json.dumps(result.to_dict()["supplements"], ensure_ascii=False),
                     json.dumps(
                         [asdict(item) for item in result.supplement_attempts], ensure_ascii=False
                     ),

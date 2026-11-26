@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
 
 from .access_policy import AccessPolicyStore
 from .doi import doi_slug, normalize_doi
-from .filesystem import native_file_path
+from .filesystem import display_path, native_file_path, shell_safe_file_path
 from .metadata import (
     CrossrefMetadataClient,
     MetadataError,
@@ -129,7 +130,8 @@ class Harvester:
                         )
                     ],
                 )
-        pdf_path = article_dir / f"{article_dir.name or doi_slug(doi)}.pdf"
+        original_pdf_path = article_dir / f"{article_dir.name or doi_slug(doi)}.pdf"
+        pdf_path = shell_safe_file_path(original_pdf_path)
         legacy_pdf_path = article_dir / "article.pdf"
         article_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,12 +152,20 @@ class Harvester:
         cached_pdf = next(
             (
                 candidate
-                for candidate in dict.fromkeys((pdf_path, legacy_pdf_path))
+                for candidate in dict.fromkeys((pdf_path, original_pdf_path, legacy_pdf_path))
                 if candidate.exists() and is_valid_pdf(candidate)
             ),
             None,
         )
         if cached_pdf is not None and not overwrite:
+            # 长路径缓存保留原件，另存兼容副本，恢复任务无需重新下载。
+            if shell_safe_file_path(cached_pdf) != Path(display_path(cached_pdf)):
+                compatible = shell_safe_file_path(cached_pdf)
+                if not compatible.exists():
+                    with compatible.open("xb") as output, cached_pdf.open("rb") as source:
+                        shutil.copyfileobj(source, output)
+                if is_valid_pdf(compatible):
+                    cached_pdf = compatible
             result = DownloadResult(
                 doi=doi,
                 success=True,

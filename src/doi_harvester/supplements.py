@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import requests
 
+from .filesystem import native_file_path, shell_safe_file_path
 from .models import Attempt, SupplementArtifact
 
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -674,8 +675,13 @@ class HttpSupplementDownloader:
                     index=index,
                     article_name=article_dir.name,
                 )
+                try:
+                    name = shell_safe_file_path(supplement_dir / name, reserve=16).name
+                except ValueError:
+                    # 长目录保留原编号；临时文件使用内部长路径，不占最终文件预算。
+                    name = shell_safe_file_path(supplement_dir / name).name
                 supplement_dir.mkdir(parents=True, exist_ok=True)
-                temporary = supplement_dir / f".{name}.{index}.part"
+                temporary = native_file_path(supplement_dir / f".{name}.{index}.part")
                 with temporary.open("wb") as output:
                     while True:
                         chunk = page.evaluate(
@@ -706,7 +712,7 @@ class HttpSupplementDownloader:
                         status = "cached"
                         temporary.unlink()
                     else:
-                        destination = (
+                        destination = shell_safe_file_path(
                             supplement_dir / f"{Path(name).stem}-{digest[:12]}{Path(name).suffix}"
                         )
                         if destination.exists():
@@ -819,9 +825,14 @@ class HttpSupplementDownloader:
                         index=index,
                         article_name=article_dir.name,
                     )
+                    try:
+                        name = shell_safe_file_path(supplement_dir / name, reserve=16).name
+                    except ValueError:
+                        # 与浏览器下载一致，避免临时后缀挤占可用文件名长度。
+                        name = shell_safe_file_path(supplement_dir / name).name
                     supplement_dir.mkdir(parents=True, exist_ok=True)
                     destination = supplement_dir / name
-                    temporary = supplement_dir / f".{name}.{index}.part"
+                    temporary = native_file_path(supplement_dir / f".{name}.{index}.part")
                     try:
                         with temporary.open("wb") as output:
                             for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -838,7 +849,7 @@ class HttpSupplementDownloader:
                                 status = "cached"
                                 temporary.unlink()
                             else:
-                                destination = (
+                                destination = shell_safe_file_path(
                                     supplement_dir
                                     / f"{Path(name).stem}-{incoming_digest[:12]}{Path(name).suffix}"
                                 )

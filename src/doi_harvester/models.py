@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .filesystem import display_path
+
 
 @dataclass(frozen=True, slots=True)
 class DownloadCandidate:
@@ -99,6 +101,8 @@ class DownloadResult:
     def to_dict(self) -> dict[str, Any]:
         """返回可直接写入 JSON 的结构。"""
         payload = asdict(self)
-        payload["article_dir"] = str(self.article_dir)
-        payload["pdf_path"] = str(self.pdf_path) if self.pdf_path else None
+        payload["article_dir"] = display_path(self.article_dir)
+        payload["pdf_path"] = display_path(self.pdf_path) if self.pdf_path else None
+        for item in payload["supplements"]:
+            item["path"] = display_path(item["path"])
         return payload
