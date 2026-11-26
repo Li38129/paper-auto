@@ -60,7 +60,7 @@
   --delay 1
 ```
 
-`--desktop-assist` 控制「验证页交给 windows-mcp 用真鼠标点击」：`auto`（默认）探测到可用 windows-mcp 就启用，`off` 关闭。实现位于 `src/doi_harvester/desktop_assist.py`：定位 `challenges.cloudflare.com` 的 iframe，按其 bounding box 的 `(0.10, 0.50)` 换算屏幕物理像素后点击，点击后页面变 `ready`/`authenticated` 即通过；打开 DOI 后与 401/403/429 后各触发一次，每次最多 2 轮、每轮等 1.5 秒。环境变量 `DOI_HARVESTER_DESKTOP_ASSIST=off` 可整体关闭，`DOI_HARVESTER_DESKTOP_COMMAND`/`_ARGS` 指定启动命令，`WINDOWS_MCP_HOME` 默认 `~/.windows-mcp`。该辅助只在真浏览器窗口上有意义；Playwright 自建上下文里点击送达也不勾选，仍须走 CDP 附着 Edge 取文。
+`--desktop-assist` 控制「验证页交给 windows-mcp 用真鼠标点击」：`auto`（默认）探测到可用 windows-mcp 就启用，`off` 关闭。实现位于 `src/doi_harvester/desktop_assist.py`：定位 `challenges.cloudflare.com` 的 iframe，按其 bounding box 的 `(0.10, 0.50)` 换算屏幕物理像素后点击，点击后页面变 `ready`/`authenticated` 即通过；打开 DOI 后与 401/403/429 后各触发一次，每次最多 2 轮、每轮等 1.5 秒。环境变量 `DOI_HARVESTER_DESKTOP_ASSIST=off` 可整体关闭，`DOI_HARVESTER_DESKTOP_COMMAND`/`_ARGS` 指定启动命令，`WINDOWS_MCP_HOME` 默认 `~/.windows-mcp`。该辅助只在真浏览器窗口上有意义；Playwright 自建上下文里点击送达也不勾选，仍须走 CDP 附着 Edge 取文。windows-mcp 把控制权判给用户时会持续拒动（`USER_CONTROL`/`PHYSICAL_INPUT_HELD`），此时模块改用进程内 `NativePointer`（`SetCursorPos` + `mouse_event`）完成点击，无需任何确认。
 
 默认使用前台监督模式。人工验证统一按 `AGENTS.md` 4.1 自助通过：缓冲 10 秒 → 仍停验证页则 `computer` 点选 → 通过后 `jobs resume <job_id>`。自助未通过时该篇保留页面与检查点、进入 `waiting_for_user` 交人工接管，不再由用户在启动时预选 skip/pause，也不自动标记 `auth_skipped`。模型每次等待不超过 60 秒，并在状态变化、完成或需要人工操作时及时汇报。任务较多且用户明确要求后台运行时才增加 `--detach`，并同时传入 `--workbook`、`--node-path`、`--node-modules`，由后台任务每批自动回写 Excel。后台任务遇验证时同样先自助处理，未通过再等待人工接管并保留后续条目；完成授权后使用 `jobs resume <job_id>` 前台恢复，需要继续后台运行时显式增加 `--detach`。不得重建编号目录或重新编号。
 
