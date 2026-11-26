@@ -13,11 +13,13 @@ import shutil
 import socket
 import subprocess
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
+from . import desktop_assist
 from .models import Attempt
 from .transport import is_valid_pdf
 
@@ -690,7 +692,9 @@ class BrowserAuthorizer:
             command.append(f"--proxy-server={proxy['server']}")
             if proxy.get("bypass"):
                 command.append(f"--proxy-bypass-list={proxy['bypass'].replace(',', ';')}")
-        command.append(target_url)
+        # 为本次启动的标签加唯一标识，避免再开一个 DOI 页或占用已有标签。
+        startup_url = f"data:text/html,autopaper-{uuid.uuid4().hex}"
+        command.append(startup_url)
 
         process = subprocess.Popen(  # noqa: S603
             command,
@@ -718,14 +722,13 @@ class BrowserAuthorizer:
                 context = browser.contexts[0]
                 from .visible_browser import work_page
 
-                page = work_page(context, self.profile_dir)
+                page = work_page(context, self.profile_dir, startup_url=startup_url)
                 page.set_default_timeout(self.navigation_timeout_ms)
-                if page.url in {"", "about:blank", "chrome://newtab/"}:
-                    page.goto(
-                        target_url,
-                        wait_until="domcontentloaded",
-                        timeout=self.navigation_timeout_ms,
-                    )
+                page.goto(
+                    target_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
                 # 先保存可复用端点；即使授权等待被中止，后续任务仍可连接同一浏览器。
                 self._write_state(
                     AuthorizationResult(
@@ -815,6 +818,7 @@ class BrowserPdfDownloader:
         challenge_policy: str = "skip",
         challenge_timeout_seconds: float = 600.0,
         keep_browser_open: bool = False,
+        desktop_assist: bool | None = None,
     ) -> None:
         self.profile_dir = profile_dir or self._default_profile_dir()
         self.channel = channel if channel is not None else self._default_channel()
@@ -826,8 +830,57 @@ class BrowserPdfDownloader:
         self.challenge_policy = challenge_policy
         self.challenge_timeout_seconds = max(challenge_timeout_seconds, 0.0)
         self.keep_browser_open = keep_browser_open
+        # 验证页优先交给桌面辅助（windows-mcp 真实鼠标点击）；None 表示按环境变量自动探测
+        self.desktop_assist = desktop_assist
+        self._desktop: desktop_assist.WindowsMcpDesktop | None = None
+        self._desktop_checked = False
         if self.interactive_wait_seconds > 0 and self.challenge_policy == "pause":
             self.challenge_timeout_seconds = self.interactive_wait_seconds
+
+    def desktop_controller(self) -> desktop_assist.WindowsMcpDesktop | None:
+        """按需打开 windows-mcp 桌面控制器；不可用时返回 None 并记住结论。"""
+        if self.desktop_assist is False:
+            return None
+        if self._desktop_checked:
+            return self._desktop
+        self._desktop_checked = True
+        try:
+            self._desktop = desktop_assist.open_controller()
+        except Exception as exc:  # noqa: BLE001 桌面辅助只是兜底，失败不影响下载
+            LOGGER.info("桌面辅助不可用：%s", exc)
+            self._desktop = None
+        if self._desktop is None:
+            LOGGER.info("桌面辅助未启用：未找到可用的 windows-mcp 服务")
+        return self._desktop
+
+    def close_desktop(self) -> None:
+        """释放桌面辅助进程。"""
+        controller = self._desktop
+        self._desktop = None
+        if controller is not None:
+            controller.close()
+
+    def resolve_challenge(self, page: object, status: str) -> str:
+        """验证页兜底：用真实鼠标点击挑战控件，返回点击后的页面状态。"""
+        if status not in {"challenge_required", "authentication_required"}:
+            return status
+        controller = self.desktop_controller()
+        if controller is None:
+            return status
+        outcome = desktop_assist.resolve_challenge(
+            page,
+            classify=classify_page,
+            controller=controller,
+        )
+        LOGGER.info(
+            "验证页桌面辅助：attempted=%s passed=%s %s",
+            outcome.attempted,
+            outcome.passed,
+            outcome.detail,
+        )
+        if not outcome.passed:
+            return status
+        return wait_for_verification(page)
 
     def download(
         self,
@@ -981,6 +1034,8 @@ class BrowserPdfDownloader:
         page.wait_for_timeout(3000)
 
         page_status = wait_for_verification(page)
+        # 遇到人机验证先交给桌面辅助：用 windows-mcp 在真实屏幕坐标上点击
+        page_status = self.resolve_challenge(page, page_status)
         if page_status in {"challenge_required", "authentication_required"}:
             return Attempt(
                 source="browser",
@@ -1018,6 +1073,7 @@ class BrowserPdfDownloader:
             )
             if response.status in {401, 403, 429}:
                 status = wait_for_verification(page)
+                status = self.resolve_challenge(page, status)
                 if status in {"challenge_required", "authentication_required"}:
                     return Attempt(
                         source="browser", url=url, success=False, reason=status,
@@ -1071,7 +1127,9 @@ class BrowserPdfDownloader:
             if navigation_result is not None:
                 return navigation_result
 
-        click_result = self._download_by_click(page=page, temporary=temporary)
+        click_result = self._download_by_click(
+            page=page, temporary=temporary, expected_urls=set(urls)
+        )
         if click_result and is_valid_pdf(temporary):
             size = temporary.stat().st_size
             temporary.replace(destination)
@@ -1155,6 +1213,8 @@ class BrowserPdfDownloader:
             captured: dict[str, object] = {}
             try:
                 scratch = context.new_page()
+                self._record_temporary_page(scratch)
+                scratch.on("popup", lambda popup: popup.close())
                 # 浏览器可能把 PDF 当下载处理，此时只能从 download 事件取字节
                 scratch.on(
                     "download",
@@ -1266,20 +1326,80 @@ class BrowserPdfDownloader:
                         urls.append(resolved)
         return list(dict.fromkeys(urls))
 
-    def _download_by_click(self, *, page: object, temporary: Path) -> bool:
+    def _record_temporary_page(self, page: object) -> None:
+        """登记下载器创建的临时标签，异常退出后可按原 DOI 和会话回收。"""
+        marker = self.profile_dir / "work-target.json"
+        if not marker.is_file():
+            return
+        try:
+            from .visible_browser import _target_id
+
+            work = json.loads(marker.read_text(encoding="utf-8"))
+            if not all(work.get(key) for key in ("target_id", "doi", "endpoint")):
+                return
+            tab_id = _target_id(page.context, page)
+            if tab_id == work["target_id"] or not re.fullmatch(r"[0-9A-Fa-f]+", tab_id):
+                return
+            directory = self.profile_dir / "temporary-tabs"
+            directory.mkdir(exist_ok=True)
+            record = directory / f"{tab_id}.json"
+            record.write_text(json.dumps(work), encoding="utf-8")
+            page.once("close", lambda *_: record.unlink(missing_ok=True))
+        except Exception as exc:
+            LOGGER.debug("无法登记临时标签：%s", exc)
+
+    def _download_by_click(self, *, page: object, temporary: Path, expected_urls: set[str]) -> bool:
+        tried_urls: set[str] = set()
+        popups: list[object] = []
+
+        def capture_popup(popup: object) -> None:
+            self._record_temporary_page(popup)
+            if popups:
+                previous = popups[0]
+                if not previous.is_closed():
+                    if (_matches_expected_article_url(str(previous.url), expected_urls)
+                            or not _matches_expected_article_url(str(popup.url), expected_urls)):
+                        popup.close()
+                        return
+                    previous.close()
+                popups.clear()
+            popups.append(popup)
+            popup.on("popup", lambda child: child.close())
+
         for selector in self.selectors:
             if selector.startswith("iframe"):
                 continue
             locator = page.locator(selector).first
             if locator.count() == 0:
                 continue
+            href = locator.get_attribute("href")
+            if href:
+                url = urljoin(page.url, href)
+                if url in tried_urls:
+                    continue
+                tried_urls.add(url)
+            # 弹窗只归本次点击使用。PDF 查看器取完即关，超时和失败也会清理。
+            page.on("popup", capture_popup)
             try:
                 with page.expect_download(timeout=min(self.timeout_ms, 20_000)) as download_info:
                     locator.click()
                 download_info.value.save_as(str(temporary))
                 return True
             except Exception:  # noqa: BLE001
-                continue
+                for popup in popups:
+                    for surface in [popup, *popup.frames]:
+                        if not _matches_expected_article_url(str(surface.url), expected_urls):
+                            continue
+                        payload = self._fetch_pdf_from_page(page=surface)
+                        if payload is not None:
+                            temporary.write_bytes(payload[0])
+                            return True
+            finally:
+                page.remove_listener("popup", capture_popup)
+                for popup in popups:
+                    if not popup.is_closed():
+                        popup.close()
+                popups.clear()
         return False
 
     def _fetch_pdf_from_page(

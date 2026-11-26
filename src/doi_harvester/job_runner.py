@@ -262,6 +262,7 @@ def run_job(
             "challenge_timeout_seconds": float(options.get("challenge_timeout_seconds") or 600.0),
             "interactive_wait_seconds": float(options.get("interactive_wait_seconds") or 0.0),
             "keep_browser_open": bool(options.get("keep_browser_open", True)),
+            "desktop_assist": bool(options.get("desktop_assist", True)),
             "headless": bool(options.get("headless", False)),
             **(
                 {"channel": str(options["browser_channel"])}
@@ -274,6 +275,7 @@ def run_job(
             "challenge_policy": str(options.get("challenge_policy") or "pause"),
             "challenge_timeout_seconds": float(options.get("challenge_timeout_seconds") or 600.0),
             "keep_browser_open": bool(options.get("keep_browser_open", True)),
+            "desktop_assist": bool(options.get("desktop_assist", True)),
         }
     )
     if (

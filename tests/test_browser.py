@@ -612,6 +612,64 @@ def test_browser_ignores_non_pdf_page(tmp_path: Path) -> None:
     assert result is None
 
 
+@pytest.mark.parametrize("viewer_matches", [True, False])
+def test_pdf_click_closes_its_popups_before_retry(tmp_path, monkeypatch, viewer_matches):
+    from contextlib import contextmanager
+
+    pdf_url = "https://publisher.test/article-pdf/test.pdf"
+    body = b"%PDF-1.7\n" + b"x" * 2048
+    listeners = {}
+    opened = []
+    clicks = []
+
+    class Popup:
+        frames = []
+        closed = False
+
+        def __init__(self, url):
+            self.url = url
+
+        def on(self, *_):
+            pass
+
+        def close(self):
+            self.closed = True
+
+        def is_closed(self):
+            return self.closed
+
+    def click():
+        clicks.append(True)
+        for url in [pdf_url if viewer_matches else "https://publisher.test/info", "about:blank"]:
+            opened.append(Popup(url))
+            listeners["popup"](opened[-1])
+        assert sum(not p.closed for p in opened) == 1
+
+    @contextmanager
+    def expect_download(**_):
+        yield None
+        raise TimeoutError
+
+    link = types.SimpleNamespace(count=lambda: 1, get_attribute=lambda _: pdf_url, click=click)
+    page = types.SimpleNamespace(
+        url="https://publisher.test/article",
+        on=listeners.__setitem__,
+        remove_listener=lambda event, _: listeners.pop(event),
+        expect_download=expect_download,
+        locator=lambda _: types.SimpleNamespace(first=link),
+    )
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path)
+    monkeypatch.setattr(downloader, "_fetch_pdf_from_page", lambda **_: (body, 200, "", pdf_url))
+    temporary = tmp_path / "article.part"
+    assert downloader._download_by_click(
+        page=page, temporary=temporary, expected_urls={pdf_url}
+    ) is viewer_matches
+    assert len(clicks) == 1
+    assert all(p.closed for p in opened)
+    assert not listeners
+    assert temporary.exists() == viewer_matches
+
+
 def test_browser_matches_same_doi_across_wiley_subdomains() -> None:
     expected = {"https://onlinelibrary.wiley.com/doi/pdf/10.1002/aenm.202506351"}
 
@@ -675,6 +733,17 @@ def test_explicit_skip_is_not_overridden_by_wait_options(tmp_path):
         profile_dir=tmp_path, challenge_policy="skip", interactive_wait_seconds=600
     )
     assert downloader.challenge_policy == "skip"
+
+
+def test_desktop_assist_disabled_keeps_challenge_status(tmp_path):
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path, desktop_assist=False)
+    assert downloader.desktop_controller() is None
+    assert downloader.resolve_challenge(object(), "challenge_required") == "challenge_required"
+
+
+def test_desktop_assist_skips_non_challenge_status(tmp_path):
+    downloader = BrowserPdfDownloader(profile_dir=tmp_path)
+    assert downloader.resolve_challenge(object(), "ready") == "ready"
 
 
 def test_browser_does_not_extract_links_from_another_doi(tmp_path):

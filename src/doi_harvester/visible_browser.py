@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,7 +110,58 @@ def wait_for_sciencedirect_article(page: object) -> bool:
         return False
 
 
-def work_page(context: object, profile_dir: Path | None = None) -> object:
+def verified_work_page(profile_dir: Path, doi: str, timeout: int) -> None:
+    """观察原工作标签，用户完成验证且论文匹配后才允许恢复。"""
+    from playwright.sync_api import sync_playwright
+
+    marker_path = profile_dir / "work-target.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    endpoint = _read_cdp_endpoint(profile_dir)
+    if (not endpoint or urlsplit(endpoint).hostname not in {"127.0.0.1", "localhost", "::1"}
+            or marker.get("endpoint") != endpoint or marker.get("doi") != doi
+            or not marker.get("target_id")):
+        raise ValueError("工作标签的会话或 DOI 已变更，请核对原任务窗口。")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(endpoint, timeout=10000)
+        require_edge_browser(browser)
+        for context in browser.contexts:
+            for page in context.pages:
+                session = context.new_cdp_session(page)
+                try:
+                    target = session.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+                finally:
+                    session.detach()
+                if target != marker["target_id"]:
+                    continue
+                print(f"请在 Edge 工作标签完成验证：{doi}", flush=True)
+                deadline = time.monotonic() + timeout
+                while not page.is_closed():
+                    if json.loads(marker_path.read_text(encoding="utf-8")) != marker:
+                        raise ValueError("工作标签已被其他任务使用。")
+                    status = classify_page(page)
+                    host = (urlsplit(page.url).hostname or "").casefold()
+                    if (status in {"ready", "authenticated"} and host
+                            and host not in {"doi.org", "dx.doi.org"}
+                            and _page_matches_doi(page, doi)):
+                        return
+                    if time.monotonic() >= deadline:
+                        raise ValueError("等待超时，原任务保留断点。")
+                    page.wait_for_timeout(500)
+                raise ValueError("工作标签已关闭。")
+        raise ValueError("当前 Edge 会话内找不到原工作标签。")
+
+
+def _target_id(context: object, page: object) -> str:
+    session = context.new_cdp_session(page)
+    try:
+        return session.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+    finally:
+        session.detach()
+
+
+def work_page(
+    context: object, profile_dir: Path | None = None, *, startup_url: str = "", create: bool = True
+) -> object:
     """复用专用工作标签，避免覆盖用户打开的其他网页。"""
     marker = Path(profile_dir) / "work-target.json" if profile_dir else None
     target_id = ""
@@ -119,29 +171,38 @@ def work_page(context: object, profile_dir: Path | None = None) -> object:
     if target_id:
         for page in context.pages:
             try:
-                session = context.new_cdp_session(page)
-                info = session.send("Target.getTargetInfo")
-                if info["targetInfo"]["targetId"] == target_id:
-                    return page
+                matches = _target_id(context, page) == target_id
             except Exception:
                 continue
-    for page in context.pages:
-        try:
-            if page.evaluate("() => window.name") == "autopaper-work":
+            if matches:
+                if startup_url:
+                    for startup in context.pages:
+                        if startup is not page and startup.url == startup_url:
+                            startup.close()
                 return page
-        except Exception:
-            continue
-    page = context.new_page()
+        if not create:
+            raise ValueError("找不到原工作标签。")
+    page = next((p for p in context.pages if startup_url and p.url == startup_url), None)
+    if page is None:
+        for candidate in context.pages:
+            try:
+                if candidate.evaluate("() => window.name") == "autopaper-work":
+                    page = candidate
+                    break
+            except Exception:
+                continue
+    if page is None:
+        if not create:
+            raise ValueError("找不到原工作标签。")
+        page = context.new_page()
+    if not create:
+        return page
     page.evaluate("() => { window.name = 'autopaper-work'; }")
     if marker and hasattr(context, "new_cdp_session"):
-        try:
-            session = context.new_cdp_session(page)
-            info = session.send("Target.getTargetInfo")
+        with suppress(Exception):
             marker.write_text(
-                json.dumps({"target_id": info["targetInfo"]["targetId"]}), encoding="utf-8"
+                json.dumps({"target_id": _target_id(context, page)}), encoding="utf-8"
             )
-        except Exception:
-            pass
     return page
 
 
@@ -311,7 +372,7 @@ class VisibleBrowser:
                     browser = playwright.chromium.connect_over_cdp(
                         _read_cdp_endpoint(self.profile_dir)
                     )
-                    apply(work_page(browser.contexts[0], self.profile_dir))
+                    apply(work_page(browser.contexts[0], self.profile_dir, create=False))
             return True
         except Exception:
             return False

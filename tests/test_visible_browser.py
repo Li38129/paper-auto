@@ -365,13 +365,27 @@ def test_work_page_reuses_saved_target_across_origins(tmp_path: Path) -> None:
         pages = [Page("other"), Page("saved")]
 
         def new_cdp_session(self, page):
-            return SimpleNamespace(send=lambda command: {"targetInfo": {"targetId": page.target}})
+            return SimpleNamespace(
+                send=lambda command: {"targetInfo": {"targetId": page.target}},
+                detach=lambda: None,
+            )
 
         def new_page(self):
             raise AssertionError("工作标签应复用")
 
     (tmp_path / "work-target.json").write_text(json.dumps({"target_id": "saved"}), encoding="utf-8")
     assert work_page(Context(), tmp_path).target == "saved"
+
+
+def test_work_page_adopts_only_its_startup_tab_and_status_never_creates_one(tmp_path):
+    from doi_harvester.visible_browser import work_page
+
+    other = SimpleNamespace(url="about:blank", evaluate=lambda _: "")
+    startup = SimpleNamespace(url="data:text/html,autopaper-test", evaluate=lambda _: "")
+    context = SimpleNamespace(pages=[other, startup])
+    assert work_page(context, tmp_path, startup_url=startup.url) is startup
+    with pytest.raises(ValueError, match="找不到原工作标签"):
+        work_page(context, tmp_path, create=False)
 
 
 def test_display_options_and_retryable_failure(tmp_path: Path) -> None:

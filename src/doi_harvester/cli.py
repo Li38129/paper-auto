@@ -107,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=600.0,
         help="兼容参数：下载验证统一缓冲10秒，之后按 pause/skip 处理。",
     )
+    download.add_argument(
+        "--desktop-assist",
+        choices=["auto", "off"],
+        default="auto",
+        help="验证页交给 windows-mcp 用真实鼠标点击（auto 自动探测，off 关闭）。",
+    )
     download.add_argument("--delay", type=float, default=1.5, help="不同 DOI 之间的等待秒数。")
     download.add_argument("--verbose", action="store_true", help="输出调试日志。")
     download.add_argument(
@@ -160,6 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "tail":
             item.add_argument("--limit", type=int, default=30)
         if command == "resume":
+            item.add_argument(
+                "--after-verification", type=int, metavar="秒",
+                help="等待原 Edge 标签通过验证并核对 DOI，然后恢复原任务。",
+            )
             item.add_argument(
                 "--detach", action="store_true", help="把恢复后的任务交给后台 Broker。"
             )
@@ -349,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         "challenge_policy": challenge_policy,
         "challenge_timeout_seconds": challenge_timeout,
         "keep_browser_open": not args.headless and challenge_policy == "pause",
+        "desktop_assist": None if args.desktop_assist == "auto" else False,
     }
     if args.browser_channel is not None:
         browser_options["channel"] = args.browser_channel
@@ -410,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
             "challenge_policy": challenge_policy,
             "challenge_timeout_seconds": challenge_timeout,
             "keep_browser_open": not args.headless and challenge_policy == "pause",
+            "desktop_assist": args.desktop_assist != "off",
             "access_environment": args.access_environment or "default",
             "supplements": args.supplements,
             "supplements_only": args.supplements_only,
@@ -483,6 +495,26 @@ def _run_jobs(args: argparse.Namespace) -> int:
         print(f"任务已标记取消：{args.job_id}")
         return 0
     if args.jobs_command == "resume":
+        wait = getattr(args, "after_verification", None)
+        if wait is not None:
+            from .visible_browser import verified_work_page
+
+            waiting = [item["doi"] for item in job["items"] if item["status"] == "auth_required"]
+            if wait < 0 or job["status"] != "waiting_for_user" or len(waiting) != 1:
+                print("此选项需要非负等待时间，且任务须正在等待一篇论文的验证。")
+                return 2
+            try:
+                profile = Path(job["profile_dir"] or default_runtime_dir() / "profiles/default")
+                verified_work_page(profile, waiting[0], wait)
+                current = store.get_job(args.job_id)
+                changed = current["status"] != job["status"] or (
+                    current["updated_at"] != job["updated_at"]
+                )
+                if changed:
+                    raise ValueError("等待期间任务状态已变更，请检查最新断点。")
+            except Exception as exc:
+                print(f"未恢复：{exc}")
+                return 2
         try:
             count = store.prepare_resume(
                 args.job_id, retry_failed=args.retry_failed,
