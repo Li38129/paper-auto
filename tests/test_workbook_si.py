@@ -19,7 +19,7 @@ const vm = require('vm');
 const assert = require('assert');
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const start = source.indexOf('function applyReport(');
-const end = source.indexOf('function writeRowsToTable(', start);
+const end = source.indexOf('function writeRowsToSheet(', start);
 const context = {
   validateExistingRows: () => {},
   updateRowMap: () => ({byDoi: new Map([['10.1000/test', 0]])}),
@@ -39,5 +39,10 @@ assert.strictEqual(rows[0]['PDF路径'], 'article.pdf');
 context.applyReport(rows, [{download_mode: 'supplements_only', doi: '10.1000/test',
   supplement_status: 'partial'}]);
 assert.strictEqual(rows[0]['SI是否下载成功'], '否');
+assert.strictEqual(context.normalizePdfPath(String.raw`\\\\?\\E:\\paper\\article.pdf`),
+  String.raw`E:\paper\article.pdf`);
+assert.strictEqual(context.normalizePdfPath(String.raw`\\?\UNC\server\share\article.pdf`),
+  String.raw`\\server\share\article.pdf`);
 """
-    subprocess.run([node, "-e", code, str(script)], check=True, capture_output=True, text=True)
+    subprocess.run([node, "-e", code, str(script)], check=True, capture_output=True,
+                   text=True, encoding="utf-8")

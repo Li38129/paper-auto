@@ -435,10 +435,19 @@ function applyReport(rows, results) {
     row["下载成功"] = success ? "是" : "否";
     row["下载状态"] = status;
     row["失败原因"] = success ? "" : lastFailureReason(result);
-    row["PDF路径"] = cleanText(result.pdf_path);
+    row["PDF路径"] = normalizePdfPath(result.pdf_path);
     row["下载来源"] = cleanText(result.source);
     row["最后更新时间"] = timestamp;
   }
+}
+
+function normalizePdfPath(value) {
+  let text = cleanText(value);
+  // 兼容旧报告重复转义的扩展路径，对外只保留阅读器可识别的普通路径。
+  if (text.startsWith("\\\\\\\\?\\\\")) text = text.replaceAll("\\\\", "\\");
+  if (text.startsWith("\\\\?\\UNC\\")) return "\\\\" + text.slice(8);
+  if (text.startsWith("\\\\?\\")) return text.slice(4);
+  return text;
 }
 
 function supplementSuccess(result) {

@@ -30,6 +30,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 # 单独加载现有纯函数，避免工作簿入口初始化网络下载依赖。
 normalize_doi = runpy.run_path(str(PROJECT / "src/doi_harvester/doi.py"))["normalize_doi"]
 literature_name = runpy.run_path(str(PROJECT / "src/doi_harvester/naming.py"))["literature_name"]
+display_path = runpy.run_path(str(PROJECT / "src/doi_harvester/filesystem.py"))["display_path"]
 _SCHEMA = runpy.run_path(str(PROJECT / "src/doi_harvester/workbook_schema.py"))
 build_column_index = _SCHEMA["build_column_index"]
 detect_header_row = _SCHEMA["detect_header_row"]
@@ -287,7 +288,8 @@ def apply_report(rows: list[dict[str, str]], payload: dict, headers: list[str]) 
         if row is None:
             raise ValueError(f"报告包含未汇总的DOI：{doi or '<空>'}")
         mode = result.get("download_mode", "article")
-        if mode != "article" and "si_success" in names:
+        # 正文模式同样回写 SI 列：报告里每篇都带 supplement_status，遗漏会让“SI是否下载成功”永远是“未尝试”。
+        if "si_success" in names:
             supplement = str(result.get("supplement_status") or "not_requested")
             value = (
                 "是"
@@ -309,7 +311,7 @@ def apply_report(rows: list[dict[str, str]], payload: dict, headers: list[str]) 
         if isinstance(validation, dict):
             success = validation.get("valid") is True
         elif result.get("pdf_path"):
-            path = Path(str(result["pdf_path"]))
+            path = Path(display_path(result["pdf_path"]))
             try:
                 with path.open("rb") as stream:
                     success = path.stat().st_size >= 1024 and stream.read(5) == b"%PDF-"
@@ -321,7 +323,7 @@ def apply_report(rows: list[dict[str, str]], payload: dict, headers: list[str]) 
         row[names["download_status"]] = status
         failure = "" if success else str(result.get("failure_reason") or status)
         row[names["failure_reason"]] = failure
-        row[names["pdf_path"]] = result.get("pdf_path") or ""
+        row[names["pdf_path"]] = display_path(result.get("pdf_path") or "")
         if "download_source" in names:
             row[names["download_source"]] = result.get("source") or ""
         if "last_updated" in names:

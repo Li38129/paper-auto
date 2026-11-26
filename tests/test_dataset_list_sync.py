@@ -166,3 +166,49 @@ def test_apply_dry_run_does_not_write(tmp_path: Path) -> None:
     )()
     module.command_apply(args)
     assert listing.read_bytes() == before
+
+
+def test_paired_lists_block_failures_and_promote_verified_body(tmp_path, monkeypatch, capsys):
+    from openpyxl import Workbook, load_workbook
+
+    success = tmp_path / "整理清单_成功.csv"
+    failed = tmp_path / "整理清单_已尝试但未下载成功.xlsx"
+    write_csv(success, [])
+    book = Workbook()
+    book.active.append(["Sequence", "DOI", "失败原因", "Status"])
+    book.save(failed)
+    candidate = tmp_path / "candidate.txt"
+    candidate.write_text("https://doi.org/10.1000/ABC\n10.1000/abc\n", encoding="utf-8")
+    result = {"doi": "10.1000/abc", "status": "failed"}
+    report = _report(
+        tmp_path / "report.json", [result, {"doi": "10.1000/wait", "status": "pending"}]
+    )
+
+    def run(*args):
+        monkeypatch.setattr("sys.argv", ["sync", *map(str, args), "--list", str(success)])
+        assert module.main() == 0
+        return json.loads(capsys.readouterr().out)
+
+    run("apply", "--report", report)
+    check = run("check", "--candidates", candidate, "--json")
+    assert check["already_attempted_failed"] == check["already_listed"] == ["10.1000/abc"]
+    assert not check["new"] and not read_csv(success)
+
+    from pypdf import PdfWriter
+
+    body = tmp_path / "article.pdf"
+    writer = PdfWriter()
+    for _ in range(10):
+        writer.add_blank_page(width=72, height=72)
+    writer.write(body)
+    result.update(pdf_path=str(body), status="cached")
+    _report(report, [result])
+    run("apply", "--report", report)
+    run("apply", "--report", report)
+    assert [r["Sequence"] for r in read_csv(success)] == ["0001"]
+    assert not run("check", "--candidates", candidate, "--json")["already_attempted_failed"]
+    book = load_workbook(failed, read_only=True)
+    try:
+        assert len(list(book.active.values)) == 1
+    finally:
+        book.close()
