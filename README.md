@@ -97,7 +97,7 @@ $ai-paper-analysis 阅读这篇论文的 PDF，检查数据集划分和模型输
 
 可恢复任务（默认前台监督；显式增加 `--detach` 才转入后台）：
 
-下载默认使用 `--browser-display foreground`，每篇先在外部 Edge 专用工作标签请求对应 DOI。无需焦点或出版社加载成功，导航记录与真实标签绑定即可继续缓存、公开接口与 HTTP；浏览器提取链接仍须完整核验内容 DOI。验证先最多缓冲10秒，再按 pause/skip 处理。页面关闭或 Edge 不可用时暂停。显式 off/headless 保留高级兼容。
+下载默认使用 `--browser-display foreground`，每篇先在外部 Edge 专用工作标签请求对应 DOI。无需焦点或出版社加载成功，导航记录与真实标签绑定即可继续缓存、公开接口与 HTTP；浏览器提取链接仍须完整核验内容 DOI。验证页先缓冲10秒；仍在验证页时由 Agent 自己操控电脑通过（`computer` 工具需用户 `/computer` 批准，观察最多60秒、最多2轮），自查不通过才暂停该篇等人工接管。页面关闭或 Edge 不可用时暂停。显式 off/headless 保留高级兼容。
 
 ```powershell
 .\scripts\doi-harvester.ps1 download `
@@ -116,6 +116,7 @@ $ai-paper-analysis 阅读这篇论文的 PDF，检查数据集划分和模型输
 .\scripts\doi-harvester.ps1 jobs tail <任务ID>
 .\scripts\doi-harvester.ps1 jobs resume <任务ID>
 .\scripts\doi-harvester.ps1 jobs resume <任务ID> --detach
+.\scripts\doi-harvester.ps1 jobs resume <任务ID> --after-verification 60
 .\scripts\doi-harvester.ps1 jobs cancel <任务ID>
 ```
 
@@ -170,8 +171,11 @@ $ai-paper-analysis 阅读这篇论文的 PDF，检查数据集划分和模型输
   --output-dir "C:\papers" `
   --browser-fallback `
   --challenge-policy pause `
-  --challenge-timeout 600
+  --challenge-timeout 600 `
+  --desktop-assist auto
 ```
+
+`--desktop-assist`（`auto`/`off`，默认 `auto`）把验证页交给 windows-mcp 用真实鼠标点击：定位 `challenges.cloudflare.com` iframe，按组件框 `(0.10, 0.50)` 位置换算屏幕物理像素后点击，点击后页面变 `ready`/`authenticated` 即通过；打开 DOI 后与 401/403/429 后各尝试一次，每次最多 2 轮、每轮等 1.5 秒。它只在真浏览器窗口上有意义——Playwright 自建上下文里点击送达也不勾选，仍须走 CDP 附着的 Edge 取文。环境变量 `DOI_HARVESTER_DESKTOP_ASSIST=off` 整体关闭，`DOI_HARVESTER_DESKTOP_COMMAND`/`_ARGS` 指定启动命令，`WINDOWS_MCP_HOME` 默认 `~/.windows-mcp`；单元测试用该变量避免拉起真实进程。
 
 `papers.json` 中每条记录需包含 `rank`、`doi` 和绝对路径 `folder_path`；可核验时填写 `title`。交换文件放在 `temp\doi-harvester\jobs`，不要放入论文数据目录。
 默认只下载期刊正文；`--supplements` 下载正文和补充材料，`--supplements-only` 只下载补充材料，两者互斥。两种 SI 模式均支持可恢复任务、逐附件报告和 `--results-csv`。固定编号 CSV 可先用 `scripts/si-csv-batch.py` 导入，保留原序号并生成 Excel、目标 CSV 和 `papers.json`。补充材料保存在每篇目录的 `supplements` 子目录。
@@ -200,7 +204,7 @@ ACS、Elsevier 或 RSC 等需要已有订阅会话的出版社：
 Elsevier、RSC 或 Wiley 可把 `--publisher acs` 分别替换为 `--publisher elsevier`、
 `--publisher rsc` 或 `--publisher wiley`；Wiley 授权需同时传入 `--doi`。前台可见下载遇到
 `challenge_required` 或 `authentication_required` 时默认暂停最多 600 秒，不再切换到下一篇；
-`--challenge-policy skip` 在十秒缓冲后仍需验证时跳过当前篇，`pause` 保存检查点并进入 waiting_for_user，`fail-fast` 保留停止队列的兼容行为。后台和显式无头下载也沿用已选择策略；下载等待参数不延长十秒缓冲。正常任务保留外部 Edge 页面，授权完成后用 jobs resume 恢复。
+十秒缓冲后仍在验证页时，先由 Agent 操控电脑自助通过（见 AGENTS.md 第 4 条）；自助失败才落到策略：`--challenge-policy skip` 跳过当前篇，`pause` 保存检查点并进入 waiting_for_user，`fail-fast` 保留停止队列的兼容行为。后台和显式无头下载也沿用已选择策略；下载等待参数不延长十秒缓冲。正常任务保留外部 Edge 页面，人工授权完成后用 jobs resume 恢复。
 
 请在打开的可见 Chrome/Edge 中亲自完成安全验证和学校 SSO。程序会检测页面状态，只有 PDF 入口连续三次稳定出现才会确认 `ready`，不会再依赖固定等待时间。
 
@@ -316,11 +320,11 @@ SI 统一由 `HttpSupplementDownloader` 获取。浏览器发现附件链接后�
 浏览器页面 DOI 从元数据和 DOI URL 路径规范化后完整比较；截断 DOI 或相互冲突的元数据不匹配。ScienceDirect PII 页面须有对应 DOI 元数据，arXiv 保留完整编号检查。本次保持浏览器展示默认策略。
 
 
-## 新下载任务的三项确认
+## 新下载任务的两项确认
 
-通过 `autopaper-literature` 开始每个新下载目标时，即使请求已提供设置，也先在对话中确认：保存绝对路径、仅正文/仅 SI/正文加 SI、遇人工验证跳过/暂停。三项确认完成前不写 Excel、不建论文目录、不下载；同一目标内部子批次、验证后继续和断点恢复沿用原设置。CLI/MCP 不额外弹问，接收确认后的显式参数。
+通过 `autopaper-literature` 开始每个新下载目标时，即使请求已提供设置，也先在对话中确认：保存绝对路径、仅正文/仅 SI/正文加 SI。两项确认完成前不写 Excel、不建论文目录、不下载；同一目标内部子批次、验证后继续和断点恢复沿用原设置。人工验证不再作为启动选项：验证页出现时按 AGENTS.md 第 4 条由 Agent 自己操控电脑通过，自助不通过才暂停该篇并保留检查点等人工接管。CLI/MCP 不额外弹问，接收确认后的显式参数。
 
-CLI `--challenge-policy skip` 在确认的验证/登录页面结束当前篇处理，以 `auth_skipped` 保存原因、页面和已有文件，按原限速继续下一篇；`pause` 暂停为 `waiting_for_user`。MCP 增加 `challenge_policy` 参数，默认 pause，保留 fail-fast 兼容。skip 不覆盖浏览器连接及 DOI 核验错误，也不被等待时长选项改成 pause。跳过条目普通恢复不重新入队；任务 completed 表示队列处理完毕，报告仍须区分成功、人工验证跳过和其他失败。
+CLI 固定传 `--challenge-policy pause`：验证页自助未通过时暂停为 `waiting_for_user` 并保留页面与检查点，人工接管后用 `jobs resume` 继续；MCP `challenge_policy` 默认 pause。代码保留 `skip` 分支仅为兼容历史任务与 fail-fast 场景，新任务不再让用户预选。任务 completed 表示队列处理完毕，报告仍须区分成功、待人工接管和其他失败。
 
 
 ## Edge 标签、十秒验证缓冲与临时脚本
@@ -329,7 +333,7 @@ CLI `--challenge-policy skip` 在确认的验证/登录页面结束当前篇处�
 
 工作标签 ID、当前会话及本次 DOI 导航请求构成页面已打开的证据；无需焦点，导航超时、解析失败或出版社内容未加载仍允许缓存、HTTP/API 继续。浏览器内容提取须另行完整核验 DOI，不能使用旧论文链接，也不能把页面失败记成无 SI。Edge 未启动、标签关闭或无法连接仍暂停。
 
-每次独立验证码/登录页面每秒检查，最多10秒，提前恢复就继续。仍需人工验证则按 pause/skip 处理。下载的 --challenge-timeout/--interactive-wait 参数保留兼容，不再隐式延长等待；独立 auth 命令不变。
+每次独立验证码/登录页面每秒检查，最多10秒，提前恢复就继续。仍在验证页则先由 Agent 操控电脑自助通过（单次最多60秒、最多2轮），自查不通过才暂停该篇等人工接管。下载的 --challenge-timeout/--interactive-wait 参数保留兼容，不再隐式延长等待；独立 auth 命令不变。
 
 临时代码放在 `temp/doi-harvester/task-scripts/<任务或目标ID>/`，附用途、输入输出、命令和恢复说明；调用 CLI/MCP 或公开接口，不直接写数据库，不把临时 DOI、路径或顺序硬编码进生产代码。详见 AGENTS.md；失败或未完成目录保留，临时脚本不提交 Git。
 
